@@ -1,5 +1,11 @@
 Check whether the port is free and the database connectivity have right database and credentials.
- - Changes can be done on:
+In your VS install:
+ - Extention Pack for Java(by Microsoft)
+ - Liver Server
+ - Spring boot extention pack(by VMware)
+ - Git Extention pack
+
+ -- Changes can be done on:
    >Port, Database, Username(for MYSQL), Passoword(for MYSQL): spms\src\main\resources\application.properties
 
 
