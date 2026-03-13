@@ -10,6 +10,7 @@ let sidebarCollapsed = false;
 let allProjects = [];
 let allEmployees = [];
 let allUsers = [];
+let allDepartments = [];
 let notificationsList = [];
 let charts = {};
 let currentEmployeeActivities = []; // all daily_activities for the logged-in employee
@@ -268,18 +269,22 @@ function showView(role, view, element) {
     if (bc) bc.textContent = viewTitles[view] || view;
     if (role === 'employee' && view === 'projects')     renderEmployeeProjects();
     else if (role === 'employee' && view === 'performance') initPerformanceCharts();
+    else if (role === 'employee' && view === 'profile')  renderEmployeeProfile(currentUser);
     else if (role === 'manager' && view === 'overview') initManagerOverview();
     else if (role === 'manager' && view === 'workload') renderManagerWorkload();
     else if (role === 'manager' && view === 'reports')  renderManagerReports();
     else if (role === 'manager' && view === 'projects') renderManagerProjects();
+    else if (role === 'manager' && view === 'profile')  renderManagerProfile();
     else if (role === 'hr' && view === 'assignment')    renderAssignmentProjects();
     else if (role === 'hr' && view === 'employee')      renderEmployeeTracking();
     else if (role === 'hr' && view === 'projects')      renderHRProjects();
+    else if (role === 'hr' && view === 'profile')       renderHRProfile();
     else if (role === 'admin' && view === 'users')      renderUserManagement();
     else if (role === 'admin' && view === 'projects')   renderAdminProjects();
     else if (role === 'admin' && view === 'audit')      renderAuditLog();
     else if (role === 'admin' && view === 'health')     renderSystemHealth();
     else if (role === 'admin' && view === 'settings')   loadAdminSettings();
+    else if (role === 'admin' && view === 'profile')    renderAdminProfile();
 }
 
 // ── Utility Helpers ──────────────────────────────────────────
@@ -367,7 +372,8 @@ async function initEmployeeDashboard(user) {
     const actsToUse  = monthActs.length > 0 ? monthActs : currentEmployeeActivities.slice(0, 20);
     const computedTasks  = actsToUse.reduce((s,a)=>s+(parseInt(a.tasksDone||a.tasks_done)||0),0);
     const computedHours  = Math.round(actsToUse.reduce((s,a)=>s+(parseFloat(a.hoursWorked||a.hours_worked)||0),0));
-    const pendingReviews = notificationsList.filter(n=>n.type==='review'&&!n.is_read).length || 3;
+    // Only count pending reviews from actual unread notifications, never use a fallback number
+    const pendingReviews = notificationsList.filter(n=>n.type==='review'&&!n.is_read).length;
 
     // ── Try backend stats — handle BOTH camelCase and snake_case field names ──
     // (Jackson SNAKE_CASE strategy: activeProjects→active_projects, tasksCompleted→tasks_completed)
@@ -389,7 +395,8 @@ async function initEmployeeDashboard(user) {
         pendingReviews:  (bPending!= null && bPending> 0) ? bPending: pendingReviews,
         hoursThisMonth:  (bHours  != null && bHours  > 0) ? bHours  : computedHours,
         monthActivities: monthActs.length > 0 ? monthActs : actsToUse,
-        allActivities:   currentEmployeeActivities
+        allActivities:   currentEmployeeActivities,
+        hasActivityData: currentEmployeeActivities.length > 0
     };
 
     renderEmployeeOverview(user, allProjects, empDashStats);
@@ -476,9 +483,9 @@ async function renderRecentActivitiesFromDB() {
                 if (!seen.has(key)) { seen.add(key); acts.push(a); }
             });
         } else {
-            // Fallback: get all activities
-            const r = await api('GET', '/activities', { limit: 30 });
-            acts = r.data || [];
+            // New user with no projects — show empty state, do NOT fetch all activities
+            container.innerHTML = '<p style="color:var(--text-secondary);padding:1rem 0">No recent activities yet — you\'ll see updates here once you\'re assigned to a project.</p>';
+            return;
         }
 
         // Sort newest-first, take top 8
@@ -531,11 +538,13 @@ function renderEmployeeProfile(user) {
     el('profileRoleInfo', roleLabel);
     const av = document.getElementById('profileAvatar');
     if (av) av.textContent = u.avatarInitials || u.avatar_initials || initials(u.name);
-    // Profile stat cards
+    // Profile stat cards — only show real data; display N/A for brand-new users
+    const hasActivity = (currentEmployeeActivities && currentEmployeeActivities.length > 0)
+        || allProjects.some(p => p.assignedUsers && p.assignedUsers.some(a => a.id == u.id || a.userId == u.id));
     const pa = document.getElementById('profilePerformance');
     const pp = document.getElementById('profileProjects');
     const pt = document.getElementById('profileTasks');
-    if (pa) pa.textContent = (u.performanceScore || u.performance_score || 0) + '%';
+    if (pa) pa.textContent = hasActivity ? (u.performanceScore || u.performance_score || 0) + '%' : 'N/A';
     if (pp) pp.textContent = u.projectCount || allProjects.filter(p=>p.status==='active').length || 0;
     if (pt) pt.textContent = u.tasksCompleted || u.tasks_completed || 0;
     // Skills
@@ -640,8 +649,9 @@ async function openProjectDetail(id, role) {
                     <h4>💬 Comments & Instructions</h4>
                     <div id="commentsList${p.id}">
                         ${comments.map(c => {
-                            const isOwn = currentUser && (c.authorId === currentUser.id || c.author_id === currentUser.id);
-                            const canDelComment = (role === 'manager' || role === 'hr') && isOwn;
+                            const isOwn = currentUser && (c.authorId === currentUser.id || c.author_id === currentUser.id || c.authorName === currentUser.name || c.author_name === currentUser.name);
+                            // HR can delete any comment; manager can delete any comment; employee can delete own
+                            const canDelComment = role === 'hr' || role === 'manager' || (role === 'employee' && isOwn);
                             return `<div class="comment-item" id="cmt-${c.id}">
                                 <div class="comment-author">${c.authorName||c.author_name||'User'} <span class="comment-role">(${c.authorRole||c.author_role||''})</span></div>
                                 <div class="comment-text">${c.commentText||c.comment_text}</div>
@@ -899,7 +909,9 @@ async function updatePerformanceChart() {
         const totalCommits  = data.totalCommits  ?? commits.reduce((s,c)=>s+c,0);
         const totalTasks    = data.totalTasks    ?? tasks.reduce((s,t)=>s+t,0);
         const avgHrs        = data.avgHoursPerDay?? (hours.length ? (hours.reduce((s,h)=>s+h,0)/hours.length).toFixed(1) : 0);
-        const productivity  = data.productivityScore ?? Math.min(100,Math.round(totalCommits/Math.max(1,hours.length)*8+70));
+        // Productivity: only compute if user has real commit data; 0 for brand-new users
+        const hasRealData   = totalCommits > 0 || totalTasks > 0 || parseFloat(avgHrs) > 0;
+        const productivity  = data.productivityScore ?? (hasRealData ? Math.min(100, Math.round(totalCommits/Math.max(1,hours.length)*8+70)) : 0);
         const setEl = (id,v) => { const e=document.getElementById(id); if(e) e.textContent=v; };
         setEl('totalCommits',     totalCommits);
         setEl('avgHours',         avgHrs);
@@ -1293,9 +1305,14 @@ async function confirmManagerAssign() {
         closeModal('tempAssignModal');
         window._selectedAssignEmps = [];
         showToast(`Assigned ${empIds.length} employee(s) to project ✓`);
-        // Refresh projects
+        // Refresh projects from DB to get the real updated status
         const projRes = await api('GET', '/projects');
         allProjects = projRes.data || [];
+        // Also optimistically update the local project status if API didn't change it
+        const localProj = allProjects.find(p=>p.id===projId);
+        if (localProj && localProj.status === 'unassigned') {
+            localProj.status = 'active';
+        }
         renderManagerWorkload();
         renderManagerProjects();
     } catch (e) {
@@ -1703,9 +1720,10 @@ async function renderAssignmentProjects() {
     const container = document.getElementById('assignmentProjectsGrid');
     if (!container) return;
     setLoading('assignmentProjectsGrid', 'Loading projects…');
-    // Reload fresh from DB
+    // Reload fresh from DB and update global allProjects
     const res = await api('GET', '/projects').catch(()=>({ data:[] }));
     const projects = res.data || [];
+    allProjects = projects; // ← keep global in sync so selectAssignmentProject can find them
     // Show all non-completed/archived projects so HR can assign or manage
     let filtered = projects.filter(p=>p.status!=='completed'&&p.status!=='archived');
     const search  = document.getElementById('assignProjectSearch')?.value?.toLowerCase() || '';
@@ -2211,11 +2229,17 @@ async function openEditUserModal(userId) {
     const modal = document.getElementById('editUserModal');
     if (!modal) return;
     const sv = (id,v) => { const el=document.getElementById(id); if(el) el.value=v||''; };
-    sv('editUserId',    user.id);
-    sv('editUserName',  user.name);
-    sv('editUserEmail', user.email);
-    sv('editUserRole',  user.role);
-    sv('editUserDept',  user.departmentName||user.department_name||'');
+    sv('editUserId',          user.id);
+    sv('editUserName',        user.name);
+    sv('editUserEmail',       user.email);
+    sv('editUserRole',        user.role);
+    sv('editUserDept',        user.departmentName||user.department_name||'');
+    sv('editUserPerformance', user.performanceScore||user.performance_score||'');
+    sv('editUserHours',       user.hoursPerWeek||user.hours_per_week||'');
+    // Populate skills field
+    let skills = user.skills;
+    if (typeof skills === 'string') try { skills = JSON.parse(skills); } catch { skills = []; }
+    sv('editUserSkills', Array.isArray(skills) ? skills.join(', ') : (skills||''));
     modal.classList.add('active');
 }
 
@@ -2263,13 +2287,27 @@ async function handleAddUser(event) {
 
 async function handleEditUser(event) {
     event.preventDefault();
-    const id   = parseInt(document.getElementById('editUserId')?.value);
-    const name = document.getElementById('editUserName')?.value?.trim();
-    const email= document.getElementById('editUserEmail')?.value?.trim();
-    const role = document.getElementById('editUserRole')?.value;
-    const dept = document.getElementById('editUserDept')?.value?.trim();
+    const id       = parseInt(document.getElementById('editUserId')?.value);
+    const name     = document.getElementById('editUserName')?.value?.trim();
+    const email    = document.getElementById('editUserEmail')?.value?.trim();
+    const role     = document.getElementById('editUserRole')?.value;
+    const dept     = document.getElementById('editUserDept')?.value?.trim();
+    const perfRaw  = document.getElementById('editUserPerformance')?.value;
+    const hoursRaw = document.getElementById('editUserHours')?.value;
+    const password = document.getElementById('editUserPassword')?.value || '';
+    const skillsRaw= document.getElementById('editUserSkills')?.value?.trim() || '';
+    const skills   = skillsRaw ? skillsRaw.split(',').map(s=>s.trim()).filter(Boolean) : [];
+    const payload  = {
+        name, email, role, departmentName: dept,
+        requestorId:   currentUser?.id,
+        requestorName: currentUser?.name
+    };
+    if (perfRaw  !== '') payload.performanceScore = parseInt(perfRaw);
+    if (hoursRaw !== '') payload.hoursPerWeek     = parseInt(hoursRaw);
+    if (password)        payload.password         = password;
+    if (skillsRaw)       payload.skills           = JSON.stringify(skills);
     try {
-        await api('PUT', `/users/${id}`, { name, email, role, departmentName: dept, requestorId: currentUser?.id, requestorName: currentUser?.name });
+        await api('PUT', `/users/${id}`, payload);
         // Refetch fresh from DB to confirm the update is persisted
         const fresh = await api('GET', '/users').catch(()=>({ data:allUsers }));
         allUsers = fresh.data || allUsers;
@@ -2586,7 +2624,7 @@ function showStatDetail(role, type) {
             title:'Pending Reviews',
             items: notificationsList.filter(n=>n.type==='review').length
                 ? notificationsList.filter(n=>n.type==='review').map(n=>`<div class="stat-detail-item">⏳ ${n.title}: ${n.message}</div>`)
-                : ['PR #87 — Backend Auth (requested by Mike Johnson)','Wireframes v2 — Design sign-off needed','Security module — Code review for Auth endpoint'].map(t=>`<div class="stat-detail-item">⏳ ${t}</div>`)
+                : ['<div class="stat-detail-item" style="color:var(--text-secondary)">No pending reviews at this time.</div>']
         },
         'employee-hours':            {
             title:'Hours This Month',
@@ -3117,6 +3155,211 @@ window.handleAddComment = addProjectComment;
 window.toggleAssignEmployee = toggleAssignEmployee;
 window.confirmManagerAssign = confirmManagerAssign;
 window.deleteProjectComment = deleteProjectComment;
+window.renderManagerProfile = renderManagerProfile;
+window.renderHRProfile      = renderHRProfile;
+window.renderAdminProfile   = renderAdminProfile;
+
+// ============================================================
+//  PROFILE PAGES — MANAGER / HR / ADMIN
+// ============================================================
+function renderManagerProfile() {
+    const u = currentUser;
+    if (!u) return;
+    const container = document.getElementById('manager-profile');
+    if (!container) return;
+    const roleLabel = 'Manager';
+    const teamEmps  = allUsers.filter(e=>e.role==='employee');
+    const activeProjects = allProjects.filter(p=>p.status==='active').length;
+    const completedProjects = allProjects.filter(p=>p.status==='completed').length;
+    let skills = u.skills;
+    if (typeof skills === 'string') try { skills = JSON.parse(skills); } catch { skills = []; }
+    const colors = ['primary','success','warning','info','secondary'];
+    const skillsHTML = (skills||[]).map((s,i)=>`<span class="skill-tag skill-tag-${colors[i%colors.length]}">${s}</span>`).join('')
+        || '<span style="color:var(--text-secondary)">No skills listed</span>';
+    container.innerHTML = `
+    <div class="page-header"><div><h1>My Profile</h1><p>Your manager account details and team overview</p></div></div>
+    <div class="grid-2">
+        <div class="card card-modern profile-card-center">
+            <div class="profile-avatar-large" style="background:linear-gradient(135deg,#059669,#10B981)">${u.avatarInitials||u.avatar_initials||initials(u.name)}</div>
+            <h2 class="profile-name">${u.name}</h2>
+            <p class="profile-id">${u.employeeId||u.employee_id||'—'}</p>
+            <p class="profile-department">${u.departmentName||u.department_name||'—'}</p>
+            <div class="profile-stats">
+                <div class="profile-stat"><div class="profile-stat-value">${teamEmps.length}</div><div class="profile-stat-label">Team Size</div></div>
+                <div class="profile-stat"><div class="profile-stat-value">${activeProjects}</div><div class="profile-stat-label">Active Projects</div></div>
+                <div class="profile-stat"><div class="profile-stat-value">${completedProjects}</div><div class="profile-stat-label">Completed</div></div>
+            </div>
+        </div>
+        <div class="card card-modern">
+            <h3 class="card-title" style="margin-bottom:1rem">📋 Personal Information</h3>
+            <div class="info-grid">
+                <div class="info-item"><label>Full Name</label><p>${u.name}</p></div>
+                <div class="info-item"><label>Employee ID</label><p>${u.employeeId||u.employee_id||'—'}</p></div>
+                <div class="info-item"><label>Department</label><p>${u.departmentName||u.department_name||'—'}</p></div>
+                <div class="info-item"><label>Email</label><p>${u.email||'—'}</p></div>
+                <div class="info-item"><label>Join Date</label><p>${u.joinDate||u.join_date||'—'}</p></div>
+                <div class="info-item"><label>Role</label><p>${roleLabel}</p></div>
+                <div class="info-item"><label>Hours / Week</label><p>${u.hoursPerWeek||u.hours_per_week||40}h</p></div>
+                <div class="info-item"><label>Status</label><p><span class="badge badge-${u.status==='active'?'success':'danger'}">${u.status||'active'}</span></p></div>
+            </div>
+        </div>
+    </div>
+    <div class="card card-modern" style="margin-top:0">
+        <h3 class="card-title" style="margin-bottom:1rem">🎯 Skills & Expertise</h3>
+        <div class="skills-container">${skillsHTML}</div>
+    </div>
+    <div class="card card-modern" style="margin-top:0">
+        <h3 class="card-title" style="margin-bottom:1rem">👥 Your Team (${teamEmps.length} employees)</h3>
+        <div class="table-wrapper"><table class="data-table">
+            <thead><tr><th>Employee</th><th>Department</th><th>Performance</th><th>Workload</th><th>Status</th></tr></thead>
+            <tbody>${teamEmps.slice(0,10).map(e=>`<tr>
+                <td><div class="emp-cell"><div class="emp-avatar-sm">${e.avatarInitials||initials(e.name)}</div><div><div class="emp-name">${e.name}</div><div class="emp-id">${e.employeeId||e.employee_id||'—'}</div></div></div></td>
+                <td>${e.departmentName||e.department_name||'—'}</td>
+                <td><span class="badge badge-${(e.performanceScore||e.performance_score||0)>=90?'success':(e.performanceScore||e.performance_score||0)>=75?'warning':'danger'}">${e.performanceScore||e.performance_score||0}%</span></td>
+                <td><div style="display:flex;align-items:center;gap:0.5rem"><div class="progress-bar" style="width:80px;flex:none"><div class="progress-fill" style="width:${e.workload||0}%"></div></div><span>${e.workload||0}%</span></div></td>
+                <td><span class="badge badge-${e.status==='active'?'success':'danger'}">${e.status}</span></td>
+            </tr>`).join('')||'<tr><td colspan="5" style="text-align:center;color:var(--text-secondary);padding:2rem">No team members found</td></tr>'}</tbody>
+        </table></div>
+    </div>`;
+}
+
+function renderHRProfile() {
+    const u = currentUser;
+    if (!u) return;
+    const container = document.getElementById('hr-profile');
+    if (!container) return;
+    const employees = allUsers.filter(e=>e.role==='employee');
+    const managers  = allUsers.filter(e=>e.role==='manager');
+    const deptCount = allDepartments.length;
+    const activeProj = allProjects.filter(p=>p.status==='active').length;
+    let skills = u.skills;
+    if (typeof skills === 'string') try { skills = JSON.parse(skills); } catch { skills = []; }
+    const colors = ['primary','success','warning','info','secondary'];
+    const skillsHTML = (skills||[]).map((s,i)=>`<span class="skill-tag skill-tag-${colors[i%colors.length]}">${s}</span>`).join('')
+        || '<span style="color:var(--text-secondary)">No skills listed</span>';
+    container.innerHTML = `
+    <div class="page-header"><div><h1>My Profile</h1><p>Your HR account details and workforce overview</p></div></div>
+    <div class="grid-2">
+        <div class="card card-modern profile-card-center">
+            <div class="profile-avatar-large" style="background:linear-gradient(135deg,#F59E0B,#D97706)">${u.avatarInitials||u.avatar_initials||initials(u.name)}</div>
+            <h2 class="profile-name">${u.name}</h2>
+            <p class="profile-id">${u.employeeId||u.employee_id||'—'}</p>
+            <p class="profile-department">${u.departmentName||u.department_name||'—'}</p>
+            <div class="profile-stats">
+                <div class="profile-stat"><div class="profile-stat-value">${employees.length}</div><div class="profile-stat-label">Employees</div></div>
+                <div class="profile-stat"><div class="profile-stat-value">${deptCount}</div><div class="profile-stat-label">Departments</div></div>
+                <div class="profile-stat"><div class="profile-stat-value">${activeProj}</div><div class="profile-stat-label">Active Projects</div></div>
+            </div>
+        </div>
+        <div class="card card-modern">
+            <h3 class="card-title" style="margin-bottom:1rem">📋 Personal Information</h3>
+            <div class="info-grid">
+                <div class="info-item"><label>Full Name</label><p>${u.name}</p></div>
+                <div class="info-item"><label>Employee ID</label><p>${u.employeeId||u.employee_id||'—'}</p></div>
+                <div class="info-item"><label>Department</label><p>${u.departmentName||u.department_name||'—'}</p></div>
+                <div class="info-item"><label>Email</label><p>${u.email||'—'}</p></div>
+                <div class="info-item"><label>Join Date</label><p>${u.joinDate||u.join_date||'—'}</p></div>
+                <div class="info-item"><label>Role</label><p>HR Manager</p></div>
+                <div class="info-item"><label>Hours / Week</label><p>${u.hoursPerWeek||u.hours_per_week||40}h</p></div>
+                <div class="info-item"><label>Status</label><p><span class="badge badge-${u.status==='active'?'success':'danger'}">${u.status||'active'}</span></p></div>
+            </div>
+        </div>
+    </div>
+    <div class="card card-modern" style="margin-top:0">
+        <h3 class="card-title" style="margin-bottom:1rem">🎯 Skills & Expertise</h3>
+        <div class="skills-container">${skillsHTML}</div>
+    </div>
+    <div class="grid-2" style="margin-top:0">
+        <div class="card card-modern">
+            <h3 class="card-title" style="margin-bottom:1rem">🏢 Departments (${deptCount})</h3>
+            <div>${allDepartments.map(d=>{
+                const count = employees.filter(e=>(e.departmentName||e.department_name)===d.name).length;
+                return `<div style="display:flex;justify-content:space-between;align-items:center;padding:0.6rem 0;border-bottom:1px solid var(--border)"><span>🏢 ${d.name||d}</span><span class="badge badge-info">${count} emp</span></div>`;
+            }).join('')||'<p style="color:var(--text-secondary)">No departments</p>'}</div>
+        </div>
+        <div class="card card-modern">
+            <h3 class="card-title" style="margin-bottom:1rem">👔 Managers (${managers.length})</h3>
+            <div>${managers.map(m=>`
+                <div class="emp-cell" style="padding:0.5rem 0;border-bottom:1px solid var(--border)">
+                    <div class="emp-avatar-sm" style="background:linear-gradient(135deg,#059669,#10B981)">${m.avatarInitials||initials(m.name)}</div>
+                    <div><div class="emp-name">${m.name}</div><div class="emp-id">${m.departmentName||m.department_name||'—'}</div></div>
+                </div>`).join('')||'<p style="color:var(--text-secondary)">No managers</p>'}
+            </div>
+        </div>
+    </div>`;
+}
+
+function renderAdminProfile() {
+    const u = currentUser;
+    if (!u) return;
+    const container = document.getElementById('admin-profile');
+    if (!container) return;
+    const totalUsers  = allUsers.length;
+    const totalProjs  = allProjects.length;
+    const deptCount   = allDepartments.length;
+    const admins      = allUsers.filter(e=>e.role==='admin');
+    let skills = u.skills;
+    if (typeof skills === 'string') try { skills = JSON.parse(skills); } catch { skills = []; }
+    const colors = ['primary','success','warning','info','secondary'];
+    const skillsHTML = (skills||[]).map((s,i)=>`<span class="skill-tag skill-tag-${colors[i%colors.length]}">${s}</span>`).join('')
+        || '<span style="color:var(--text-secondary)">No skills listed</span>';
+    container.innerHTML = `
+    <div class="page-header"><div><h1>My Profile</h1><p>Your administrator account details and system overview</p></div></div>
+    <div class="grid-2">
+        <div class="card card-modern profile-card-center">
+            <div class="profile-avatar-large" style="background:linear-gradient(135deg,#EF4444,#DC2626)">${u.avatarInitials||u.avatar_initials||initials(u.name)}</div>
+            <h2 class="profile-name">${u.name}</h2>
+            <p class="profile-id">${u.employeeId||u.employee_id||'—'}</p>
+            <p class="profile-department">${u.departmentName||u.department_name||'—'}</p>
+            <div class="profile-stats">
+                <div class="profile-stat"><div class="profile-stat-value">${totalUsers}</div><div class="profile-stat-label">Total Users</div></div>
+                <div class="profile-stat"><div class="profile-stat-value">${totalProjs}</div><div class="profile-stat-label">Projects</div></div>
+                <div class="profile-stat"><div class="profile-stat-value">${deptCount}</div><div class="profile-stat-label">Departments</div></div>
+            </div>
+        </div>
+        <div class="card card-modern">
+            <h3 class="card-title" style="margin-bottom:1rem">📋 Personal Information</h3>
+            <div class="info-grid">
+                <div class="info-item"><label>Full Name</label><p>${u.name}</p></div>
+                <div class="info-item"><label>Employee ID</label><p>${u.employeeId||u.employee_id||'—'}</p></div>
+                <div class="info-item"><label>Department</label><p>${u.departmentName||u.department_name||'—'}</p></div>
+                <div class="info-item"><label>Email</label><p>${u.email||'—'}</p></div>
+                <div class="info-item"><label>Join Date</label><p>${u.joinDate||u.join_date||'—'}</p></div>
+                <div class="info-item"><label>Role</label><p>System Administrator</p></div>
+                <div class="info-item"><label>Hours / Week</label><p>${u.hoursPerWeek||u.hours_per_week||40}h</p></div>
+                <div class="info-item"><label>Access Level</label><p><span class="badge badge-danger">Full Access</span></p></div>
+            </div>
+        </div>
+    </div>
+    <div class="card card-modern" style="margin-top:0">
+        <h3 class="card-title" style="margin-bottom:1rem">🎯 Skills & Expertise</h3>
+        <div class="skills-container">${skillsHTML}</div>
+    </div>
+    <div class="card card-modern" style="margin-top:0">
+        <h3 class="card-title" style="margin-bottom:1rem">📊 System Overview</h3>
+        <div class="stats-grid stats-grid-4" style="margin:0">
+            ${['employee','manager','hr','admin'].map(role=>{
+                const count = allUsers.filter(u=>u.role===role).length;
+                const badge = role==='admin'?'danger':role==='manager'?'primary':role==='hr'?'warning':'info';
+                return `<div class="stat-card stat-card-animated stat-${badge==='info'?'primary':badge}" style="cursor:default"><div class="stat-icon">${role==='employee'?'👤':role==='manager'?'👔':role==='hr'?'🏢':'🔑'}</div><div class="stat-content"><div class="stat-value">${count}</div><div class="stat-label">${role.charAt(0).toUpperCase()+role.slice(1)}${count!==1?'s':''}</div></div></div>`;
+            }).join('')}
+        </div>
+    </div>
+    <div class="card card-modern" style="margin-top:0">
+        <h3 class="card-title" style="margin-bottom:1rem">🔑 All Administrators</h3>
+        <div class="table-wrapper"><table class="data-table">
+            <thead><tr><th>Admin</th><th>Email</th><th>Department</th><th>Last Login</th><th>Status</th></tr></thead>
+            <tbody>${admins.map(a=>`<tr>
+                <td><div class="emp-cell"><div class="emp-avatar-sm" style="background:linear-gradient(135deg,#EF4444,#DC2626)">${a.avatarInitials||initials(a.name)}</div><div><div class="emp-name">${a.name}</div><div class="emp-id">${a.employeeId||a.employee_id||'—'}</div></div></div></td>
+                <td>${a.email||'—'}</td>
+                <td>${a.departmentName||a.department_name||'—'}</td>
+                <td>${formatTime(a.lastLogin||a.last_login)||'Never'}</td>
+                <td><span class="badge badge-${a.status==='active'?'success':'danger'}">${a.status}</span></td>
+            </tr>`).join('')||'<tr><td colspan="5" style="text-align:center;color:var(--text-secondary)">No admin data</td></tr>'}</tbody>
+        </table></div>
+    </div>`;
+}
+
 
 async function loadProjectsFromDB() {
     try { const r = await api('GET','/projects'); allProjects = r.data||[]; renderManagerProjects&&renderManagerProjects(); } catch(e){console.warn(e);}
@@ -3126,8 +3369,6 @@ async function loadEmployeesFromDB() {
 }
 
 window.loadProjectsFromDB = loadProjectsFromDB;
-window.loadEmployeesFromDB = loadEmployeesFromDB;
-window.managerProjectCard = managerProjectCard;
 // HR assignment
 window.selectAssignmentProject = selectAssignmentProject;
 window.toggleDeptSelection = toggleDeptSelection;

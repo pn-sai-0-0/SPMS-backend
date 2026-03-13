@@ -625,6 +625,7 @@
             <li onclick="showView('manager','workload',this)"><span class="menu-icon"></span><span>Workload</span></li>
             <li onclick="showView('manager','reports',this)"><span class="menu-icon"></span><span>Project Reports</span></li>
             <li onclick="showView('manager','projects',this)"><span class="menu-icon"></span><span>Projects</span></li>
+            <li onclick="showView('manager','profile',this)"><span class="menu-icon"></span><span>My Profile</span></li>
         </ul>
         <div class="sidebar-footer">
             <div class="sidebar-user"><div class="sidebar-user-avatar" id="mgrSidebarAvatar">SA</div><div class="sidebar-user-info"><div class="sidebar-user-name" id="mgrSidebarName">Sarah Adams</div><div class="sidebar-user-role" id="mgrSidebarRole">Manager</div></div></div>
@@ -685,6 +686,10 @@
             </div>
             <div class="projects-grid" id="managerProjectsGrid"></div>
         </div>
+        <div id="manager-profile" class="view-content hidden">
+            <div class="page-header"><div><h1>My Profile</h1><p>Your personal information, role details and skills</p></div></div>
+            <div class="profile-body"></div>
+        </div>
     </main>
 </div>
 <!-- ==================== HR DASHBOARD ==================== -->
@@ -700,6 +705,7 @@
             <li onclick="showView('hr','assignment',this)"><span class="menu-icon"></span><span>Assignment</span></li>
             <li onclick="showView('hr','employee',this)"><span class="menu-icon"></span><span>Employees</span></li>
             <li onclick="showView('hr','projects',this)"><span class="menu-icon"></span><span>Projects</span></li>
+            <li onclick="showView('hr','profile',this)"><span class="menu-icon"></span><span>My Profile</span></li>
         </ul>
         <div class="sidebar-footer">
             <div class="sidebar-user"><div class="sidebar-user-avatar" id="hrSidebarAvatar">EC</div><div class="sidebar-user-info"><div class="sidebar-user-name" id="hrSidebarName">Emily Chen</div><div class="sidebar-user-role" id="hrSidebarRole">HR Manager</div></div></div>
@@ -779,6 +785,10 @@
             </div>
             <div class="projects-grid" id="hrProjectsGrid"></div>
         </div>
+        <div id="hr-profile" class="view-content hidden">
+            <div class="page-header"><div><h1>My Profile</h1><p>Your personal information, HR role details and skills</p></div></div>
+            <div class="profile-body"></div>
+        </div>
     </main>
 </div>
 <!-- ==================== ADMIN DASHBOARD ==================== -->
@@ -796,6 +806,7 @@
             <li onclick="showView('admin','audit',this)"><span class="menu-icon"></span><span>Audit Log</span></li>
             <li onclick="showView('admin','health',this)"><span class="menu-icon"></span><span>System Health</span></li>
             <li onclick="showView('admin','settings',this)"><span class="menu-icon"></span><span>Settings</span></li>
+            <li onclick="showView('admin','profile',this)"><span class="menu-icon"></span><span>My Profile</span></li>
         </ul>
         <div class="sidebar-footer">
             <div class="sidebar-user"><div class="sidebar-user-avatar" id="adminSidebarAvatar">DM</div><div class="sidebar-user-info"><div class="sidebar-user-name" id="adminSidebarName">David Martinez</div><div class="sidebar-user-role" id="adminSidebarRole">Admin</div></div></div>
@@ -912,6 +923,10 @@
                 <div style="margin-top:1.5rem"><button type="submit" class="btn btn-primary btn-glow">💾 Save All Settings</button></div>
             </form>
         </div>
+        <div id="admin-profile" class="view-content hidden">
+            <div class="page-header"><div><h1>My Profile</h1><p>Your administrator account details and system access information</p></div></div>
+            <div class="profile-body"></div>
+        </div>
     </main>
 </div>
 <!-- ==================== MODALS ==================== -->
@@ -946,6 +961,10 @@
             <div class="form-group"><label>Email</label><input type="email" id="editUserEmail" required></div>
             <div class="form-group"><label>Role</label><select id="editUserRole" required><option value="employee">Employee</option><option value="manager">Manager</option><option value="hr">HR</option><option value="admin">Admin</option></select></div>
             <div class="form-group"><label>Department</label><input type="text" id="editUserDept" required></div>
+            <div class="form-group"><label>Performance Score (0–100)</label><input type="number" id="editUserPerformance" min="0" max="100" placeholder="Leave blank to keep current"></div>
+            <div class="form-group"><label>Hours Per Week</label><input type="number" id="editUserHours" min="1" max="80" placeholder="Leave blank to keep current"></div>
+            <div class="form-group"><label>Skills (comma-separated)</label><input type="text" id="editUserSkills" placeholder="e.g. React, Node.js, Python"></div>
+            <div class="form-group"><label>New Password</label><input type="password" id="editUserPassword" placeholder="Leave blank to keep current password"></div>
             <button type="submit" class="btn btn-primary btn-block btn-glow">Save Changes ✓</button>
         </form>
     </div>
@@ -1027,10 +1046,31 @@ async function addNewDept() {
     }
 }
 function addNewSkill() {
-    const name = document.getElementById('newSkillName')?.value?.trim();
+    const input = document.getElementById('newSkillName');
+    const name = input?.value?.trim();
     if (!name) { showToast('Enter a skill name ❌', 'error'); return; }
-    document.getElementById('newSkillName').value = '';
-    showToast(`Skill "${name}" noted — add to employee profiles via User Management ✓`);
+    // Add to a global skill registry (used by profile skill tags)
+    if (!window.allSkills) window.allSkills = [];
+    if (window.allSkills.includes(name)) { showToast(`Skill "${name}" already exists ⚠️`, 'error'); return; }
+    window.allSkills.push(name);
+    // Try to persist via API (POST /skills if endpoint exists, silent fail otherwise)
+    api('POST', '/skills', { name, addedBy: currentUser?.id, addedByName: currentUser?.name })
+        .catch(()=>{}); // non-fatal — skill is noted locally
+    input.value = '';
+    // Show a visual confirmation with the skill chip
+    showToast(`Skill "${name}" added to registry ✓`);
+    // Render the current skills list below the input
+    let listEl = document.getElementById('adminSkillsList');
+    if (!listEl) {
+        listEl = document.createElement('div');
+        listEl.id = 'adminSkillsList';
+        listEl.style.cssText = 'display:flex;flex-wrap:wrap;gap:0.5rem;margin-top:0.75rem';
+        input.parentElement.parentElement.appendChild(listEl);
+    }
+    const tag = document.createElement('span');
+    tag.className = 'skill-tag skill-tag-primary';
+    tag.textContent = name;
+    listEl.appendChild(tag);
 }
 
 // Tab switching is handled by script.js (window.switchFeaturedTab)

@@ -4152,3 +4152,8 @@ body {
     text-align: center;
     background: var(--bg-secondary);
 }
+
+/* ── Profile body wrapper for manager/hr/admin profile views ── */
+.profile-body { display: flex; flex-direction: column; gap: 1.5rem; }
+.profile-body .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+@media (max-width: 768px) { .profile-body .grid-2 { grid-template-columns: 1fr; } }
