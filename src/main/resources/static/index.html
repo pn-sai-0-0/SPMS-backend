@@ -586,20 +586,20 @@
                     <p class="profile-id" id="profileId">EMP-2024-001</p>
                     <p class="profile-department" id="profileDept">Engineering Department</p>
                     <div class="profile-stats">
-                        <div class="profile-stat"><div class="profile-stat-value">92%</div><div class="profile-stat-label">Performance</div></div>
-                        <div class="profile-stat"><div class="profile-stat-value">5</div><div class="profile-stat-label">Projects</div></div>
-                        <div class="profile-stat"><div class="profile-stat-value">12</div><div class="profile-stat-label">Tasks Done</div></div>
+                        <div class="profile-stat"><div class="profile-stat-value" id="profilePerformance">—</div><div class="profile-stat-label">Performance</div></div>
+                        <div class="profile-stat"><div class="profile-stat-value" id="profileProjects">—</div><div class="profile-stat-label">Projects</div></div>
+                        <div class="profile-stat"><div class="profile-stat-value" id="profileTasks">—</div><div class="profile-stat-label">Tasks Done</div></div>
                     </div>
                 </div>
                 <div class="card card-modern">
                     <h3 class="card-title" style="margin-bottom:1rem">📋 Personal Information</h3>
                     <div class="info-grid">
-                        <div class="info-item"><label>Full Name</label><p id="profileNameInfo">John Doe</p></div>
-                        <div class="info-item"><label>Employee ID</label><p id="profileId2">EMP-001</p></div>
-                        <div class="info-item"><label>Department</label><p id="profileDeptInfo">Engineering</p></div>
-                        <div class="info-item"><label>Email</label><p id="profileEmail"><a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="22484d4a4c0c464d476251524f510c414d4f">[email&#160;protected]</a></p></div>
-                        <div class="info-item"><label>Join Date</label><p id="profileJoinDate">January 15, 2024</p></div>
-                        <div class="info-item"><label>Role</label><p>Senior Developer</p></div>
+                        <div class="info-item"><label>Full Name</label><p id="profileNameInfo">—</p></div>
+                        <div class="info-item"><label>Employee ID</label><p id="profileId2">—</p></div>
+                        <div class="info-item"><label>Department</label><p id="profileDeptInfo">—</p></div>
+                        <div class="info-item"><label>Email</label><p id="profileEmail">—</p></div>
+                        <div class="info-item"><label>Join Date</label><p id="profileJoinDate">—</p></div>
+                        <div class="info-item"><label>Role</label><p id="profileRoleInfo">—</p></div>
                     </div>
                 </div>
             </div>
@@ -923,10 +923,14 @@
         <form onsubmit="handleAddUser(event)">
             <div class="form-group"><label>Full Name *</label><input type="text" id="newUserName" placeholder="e.g. John Smith" required></div>
             <div class="form-group"><label>Email *</label><input type="email" id="newUserEmail" placeholder="john@company.com" required></div>
-            <div class="form-group"><label>Username *</label><input type="text" id="newUserUsername" placeholder="username"></div>
-            <div class="form-group"><label>Password *</label><input type="password" id="newUserPassword" placeholder="Set initial password"></div>
+            <div class="form-group"><label>Username</label><input type="text" id="newUserUsername" placeholder="username (defaults to email prefix)"></div>
+            <div class="form-group"><label>Password</label><input type="password" id="newUserPassword" placeholder="Set initial password (default: password)"></div>
             <div class="form-group"><label>Role *</label><select id="newUserRole" required><option value="">Select role</option><option value="employee">Employee</option><option value="manager">Manager</option><option value="hr">HR</option><option value="admin">Admin</option></select></div>
             <div class="form-group"><label>Department *</label><input type="text" id="newUserDept" placeholder="e.g. Engineering" required></div>
+            <div class="form-group"><label>Join Date</label><input type="date" id="newUserJoinDate"></div>
+            <div class="form-group"><label>Hours Per Week</label><input type="number" id="newUserHours" placeholder="40" min="1" max="80" value="40"></div>
+            <div class="form-group"><label>Performance Score (0–100)</label><input type="number" id="newUserPerformance" placeholder="80" min="0" max="100" value="80"></div>
+            <div class="form-group"><label>Skills (comma-separated)</label><input type="text" id="newUserSkills" placeholder="e.g. React, Node.js, Python"></div>
             <button type="submit" class="btn btn-primary btn-block btn-glow">Create User ✓</button>
         </form>
     </div>
@@ -954,8 +958,9 @@
         <form onsubmit="handleAddProject(event)">
             <div class="form-group"><label>Project Name *</label><input type="text" id="newProjectName" placeholder="Enter project name" required></div>
             <div class="form-group"><label>Description</label><textarea id="newProjectDesc" rows="3" placeholder="Brief description..."></textarea></div>
-            <div class="form-group"><label>Department</label><select id="newProjectDept"><option value="">Select department</option><option value="Engineering">Engineering</option><option value="Design">Design</option><option value="QA">QA</option><option value="Product">Product</option><option value="DevOps">DevOps</option></select></div>
+            <div class="form-group"><label>Department</label><select id="newProjectDept"><option value="">Select department</option></select></div>
             <div class="form-group"><label>Priority</label><select id="newProjectPriority"><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option><option value="low">Low</option></select></div>
+            <div class="form-group"><label>Urgency</label><select id="newProjectUrgency"><option value="medium">Medium</option><option value="high">High</option><option value="low">Low</option></select></div>
             <div class="form-group"><label>Start Date</label><input type="date" id="newProjectStart"></div>
             <div class="form-group"><label>Deadline *</label><input type="date" id="newProjectEnd" required></div>
             <button type="submit" class="btn btn-primary btn-block btn-glow">Create Project ✓</button>
@@ -973,6 +978,8 @@
             <div class="form-group"><label>Description</label><textarea id="editProjectDesc" rows="3"></textarea></div>
             <div class="form-group"><label>Status</label><select id="editProjectStatus"><option value="active">Active</option><option value="unassigned">Unassigned</option><option value="completed">Completed</option><option value="delayed">Delayed</option><option value="archived">Archived</option></select></div>
             <div class="form-group"><label>Priority</label><select id="editProjectPriority"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="critical">Critical</option></select></div>
+            <div class="form-group"><label>Urgency</label><select id="editProjectUrgency"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></div>
+            <div class="form-group"><label>Department</label><select id="editProjectDept"><option value="">Select department</option></select></div>
             <div class="form-group"><label>Deadline</label><input type="date" id="editProjectDeadline"></div>
             <button type="submit" class="btn btn-primary btn-block btn-glow">Save Changes ✓</button>
         </form>

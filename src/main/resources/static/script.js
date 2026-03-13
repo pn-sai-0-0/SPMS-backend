@@ -215,25 +215,29 @@ function updateSidebarUser(role, user) {
 
 async function logout() {
     if (currentUser) {
-        // Record session duration for employee/manager activity tracking
-        const sessionStart = localStorage.getItem('spms_session_start');
+        const sessionStart  = localStorage.getItem('spms_session_start');
         const sessionUserId = localStorage.getItem('spms_session_user');
+        let durationHours   = 0;
         if (sessionStart && sessionUserId && parseInt(sessionUserId) === currentUser.id) {
             const durationMs = Date.now() - new Date(sessionStart).getTime();
-            const durationHours = parseFloat((durationMs / 3600000).toFixed(2));
-            const today = new Date().toISOString().split('T')[0];
-            // Try to update daily_activities with session hours
+            durationHours    = parseFloat((durationMs / 3600000).toFixed(2));
+            const today      = new Date().toISOString().split('T')[0];
             try {
                 await api('PUT', `/users/${currentUser.id}/activity`, {
                     activityDate: today,
-                    hoursWorked: durationHours,
-                    action: 'logout'
+                    hoursWorked:  durationHours,
+                    action:       'logout'
                 });
             } catch { /* endpoint may not exist — logout still tracked by /auth/logout */ }
         }
         localStorage.removeItem('spms_session_start');
         localStorage.removeItem('spms_session_user');
-        try { await api('POST', '/auth/logout', { userId: currentUser.id, hoursWorked: parseFloat(((Date.now() - (sessionStart ? new Date(sessionStart).getTime() : Date.now())) / 3600000).toFixed(2)) }); } catch {}
+        try {
+            await api('POST', '/auth/logout', {
+                userId:      currentUser.id,
+                hoursWorked: durationHours
+            });
+        } catch {}
     }
     currentUser = null;
     allUsers = []; allProjects = []; allDepartments = [];
@@ -512,28 +516,35 @@ function renderEmployeeProfile(user) {
     const u = user || currentUser;
     if (!u) return;
     const el = (id,v) => { const e=document.getElementById(id); if(e) e.textContent=v; };
+    const roleLabel = u.role ? (u.role.charAt(0).toUpperCase()+u.role.slice(1)) : 'Employee';
+    // Profile card (left column)
     el('profileName',     u.name);
     el('profileId',       u.employeeId || u.employee_id || '');
     el('profileDept',     u.departmentName || u.department_name || '');
+    // Personal information grid (right column)
+    el('profileNameInfo', u.name);
+    el('profileId2',      u.employeeId || u.employee_id || '');
+    el('profileDeptInfo', u.departmentName || u.department_name || '');
     el('profileEmail',    u.email || '');
     el('profileJoinDate', u.joinDate || u.join_date || '');
-    el('profileRole',     u.role ? (u.role.charAt(0).toUpperCase()+u.role.slice(1)) : '');
+    el('profileRole',     roleLabel);
+    el('profileRoleInfo', roleLabel);
     const av = document.getElementById('profileAvatar');
     if (av) av.textContent = u.avatarInitials || u.avatar_initials || initials(u.name);
-    // Stats
+    // Profile stat cards
     const pa = document.getElementById('profilePerformance');
     const pp = document.getElementById('profileProjects');
     const pt = document.getElementById('profileTasks');
     if (pa) pa.textContent = (u.performanceScore || u.performance_score || 0) + '%';
-    if (pp) pp.textContent = u.projectCount || 0;
-    if (pt) pt.textContent = u.tasksCompleted || 0;
+    if (pp) pp.textContent = u.projectCount || allProjects.filter(p=>p.status==='active').length || 0;
+    if (pt) pt.textContent = u.tasksCompleted || u.tasks_completed || 0;
     // Skills
     const sc = document.getElementById('profileSkills');
     if (sc) {
         let skills = u.skills;
         if (typeof skills === 'string') try { skills = JSON.parse(skills); } catch { skills = []; }
         const colors = ['primary','success','warning','info','secondary'];
-        sc.innerHTML = (skills||[]).map((s,i)=>`<span class="skill-tag skill-tag-${colors[i%colors.length]}">${s}</span>`).join('');
+        sc.innerHTML = (skills||[]).map((s,i)=>`<span class="skill-tag skill-tag-${colors[i%colors.length]}">${s}</span>`).join('') || '<span style="color:var(--text-secondary)">No skills listed</span>';
     }
 }
 
@@ -628,7 +639,18 @@ async function openProjectDetail(id, role) {
                 <div class="detail-section">
                     <h4>💬 Comments & Instructions</h4>
                     <div id="commentsList${p.id}">
-                        ${comments.map(c=>`<div class="comment-item"><div class="comment-author">${c.authorName||c.author_name||'User'} <span class="comment-role">(${c.authorRole||c.author_role||''})</span></div><div class="comment-text">${c.commentText||c.comment_text}</div><div class="comment-time">${formatTime(c.createdAt||c.created_at)}</div></div>`).join('') || '<p style="color:var(--text-secondary);font-size:0.85rem">No comments yet</p>'}
+                        ${comments.map(c => {
+                            const isOwn = currentUser && (c.authorId === currentUser.id || c.author_id === currentUser.id);
+                            const canDelComment = (role === 'manager' || role === 'hr') && isOwn;
+                            return `<div class="comment-item" id="cmt-${c.id}">
+                                <div class="comment-author">${c.authorName||c.author_name||'User'} <span class="comment-role">(${c.authorRole||c.author_role||''})</span></div>
+                                <div class="comment-text">${c.commentText||c.comment_text}</div>
+                                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:0.35rem">
+                                    <div class="comment-time">${formatTime(c.createdAt||c.created_at)}</div>
+                                    ${canDelComment ? `<button class="btn btn-sm btn-danger" style="padding:0.2rem 0.5rem;font-size:0.72rem;line-height:1" onclick="deleteProjectComment(${c.id},${p.id},'${role}')">🗑️ Delete</button>` : ''}
+                                </div>
+                            </div>`;
+                        }).join('') || '<p style="color:var(--text-secondary);font-size:0.85rem">No comments yet</p>'}
                     </div>
                     ${canComment ? `<div class="comment-form"><textarea id="commentInput${p.id}" placeholder="Add a comment or instruction…" rows="3"></textarea><button class="btn btn-sm btn-primary" onclick="addProjectComment(${p.id},'${role}')">Post Comment</button></div>` : ''}
                 </div>
@@ -834,7 +856,32 @@ async function addProjectComment(projectId, role) {
     }
 }
 
-// ── Performance Charts ───────────────────────────────────────
+// ── Delete a comment (manager/HR can delete their own comments) + log action ──
+async function deleteProjectComment(commentId, projectId, role) {
+    if (!confirm('Delete this comment? This action cannot be undone.')) return;
+    // Optimistically hide
+    const row = document.getElementById(`cmt-${commentId}`);
+    if (row) row.style.opacity = '0.4';
+    try {
+        await api('DELETE', `/comments/${commentId}`, { deleterId: currentUser?.id, deleterName: currentUser?.name });
+        showToast('Comment deleted ✓');
+        // Record deletion in audit log / activity log
+        const today = new Date().toISOString().split('T')[0];
+        await api('POST', '/activities', {
+            userId:       currentUser.id,
+            personName:   currentUser.name,
+            action:       `${currentUser.name} deleted a comment from project #${projectId}`,
+            activityDate: today,
+            type:         'delete'
+        }).catch(() => {});
+        // Refresh the project detail panel so comments list updates
+        await openProjectDetail(projectId, role);
+    } catch (e) {
+        if (row) row.style.opacity = '1';
+        showToast(`Failed to delete comment: ${e.message}`, 'error');
+    }
+}
+
 function initPerformanceCharts() {
     updatePerformanceChart();
 }
@@ -936,10 +983,12 @@ function populateDeptFilter(selectId, departments, useAllLabel) {
 async function recordManagerDailyLogin(user) {
     if (!user) return;
     const today = new Date().toISOString().split('T')[0];
-    // Record in audit_log via the activities endpoint (project history with managerId)
-    // Also write a daily_activities row for the manager if the backend supports it
+    // Store session start in localStorage for logout duration calculation
+    if (!localStorage.getItem('spms_session_start')) {
+        localStorage.setItem('spms_session_start', new Date().toISOString());
+        localStorage.setItem('spms_session_user',  String(user.id));
+    }
     try {
-        // The /activities endpoint reads project_history; we use a direct activities insert if available
         await api('POST', '/activities', {
             userId: user.id,
             personName: user.name,
@@ -1547,6 +1596,11 @@ async function initHRDashboard(user) {
 
     // Record HR login activity in DB
     await recordHRAction('login', `HR ${user.name} logged into the portal`);
+    // Store session start in localStorage for logout duration calculation
+    if (!localStorage.getItem('spms_session_start')) {
+        localStorage.setItem('spms_session_start', new Date().toISOString());
+        localStorage.setItem('spms_session_user',  String(user.id));
+    }
 }
 
 function renderHRStats() {
@@ -2023,6 +2077,11 @@ async function initAdminDashboard(user) {
             activityDate: new Date().toISOString().split('T')[0], type: 'login'
         });
     } catch {}
+    // Store session start in localStorage for logout duration calculation
+    if (!localStorage.getItem('spms_session_start')) {
+        localStorage.setItem('spms_session_start', new Date().toISOString());
+        localStorage.setItem('spms_session_user',  String(user.id));
+    }
 }
 
 function renderAdminStats() {
@@ -2162,18 +2221,35 @@ async function openEditUserModal(userId) {
 
 async function handleAddUser(event) {
     event.preventDefault();
-    const name     = document.getElementById('newUserName')?.value?.trim();
-    const email    = document.getElementById('newUserEmail')?.value?.trim();
-    const role     = document.getElementById('newUserRole')?.value;
-    const dept     = document.getElementById('newUserDept')?.value?.trim();
-    const username = document.getElementById('newUserUsername')?.value?.trim() || email?.split('@')[0];
-    const password = document.getElementById('newUserPassword')?.value || 'password';
+    const name         = document.getElementById('newUserName')?.value?.trim();
+    const email        = document.getElementById('newUserEmail')?.value?.trim();
+    const role         = document.getElementById('newUserRole')?.value;
+    const dept         = document.getElementById('newUserDept')?.value?.trim();
+    const username     = document.getElementById('newUserUsername')?.value?.trim() || email?.split('@')[0];
+    const password     = document.getElementById('newUserPassword')?.value || 'password';
+    const joinDate     = document.getElementById('newUserJoinDate')?.value || new Date().toISOString().split('T')[0];
+    const hoursPerWeek = parseInt(document.getElementById('newUserHours')?.value || '40');
+    const perfScore    = parseInt(document.getElementById('newUserPerformance')?.value || '80');
+    const skillsRaw    = document.getElementById('newUserSkills')?.value?.trim() || '';
+    const skills       = skillsRaw ? skillsRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
     if (!name || !email || !role || !dept) { showToast('Please fill in all required fields ❌', 'error'); return; }
     try {
-        await api('POST', '/users', { name, email, role, departmentName: dept, username, password, requestorId: currentUser?.id, requestorName: currentUser?.name });
+        await api('POST', '/users', {
+            name, email, role,
+            departmentName: dept,
+            username, password,
+            joinDate,
+            hoursPerWeek,
+            performanceScore: perfScore,
+            skills: JSON.stringify(skills),
+            requestorId:   currentUser?.id,
+            requestorName: currentUser?.name
+        });
         closeModal('addUserModal');
         // Clear the form fields
-        ['newUserName','newUserEmail','newUserRole','newUserDept','newUserUsername','newUserPassword'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+        ['newUserName','newUserEmail','newUserRole','newUserDept','newUserUsername',
+         'newUserPassword','newUserJoinDate','newUserHours','newUserPerformance','newUserSkills'
+        ].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
         // Refetch fresh from DB
         const fresh = await api('GET', '/users').catch(()=>({ data:allUsers }));
         allUsers = fresh.data || allUsers;
@@ -2263,7 +2339,13 @@ async function renderAdminProjects() {
 }
 
 function filterAdminProjects() { renderAdminProjects(); }
-function openAddProjectModal()  { document.getElementById('addProjectModal')?.classList.add('active'); }
+function openAddProjectModal() {
+    const modal = document.getElementById('addProjectModal');
+    if (!modal) return;
+    // Populate department dropdown from real DB data (replaces hardcoded options)
+    populateDeptFilter('newProjectDept', allDepartments);
+    modal.classList.add('active');
+}
 
 async function openEditProjectModal(id) {
     const proj = allProjects.find(p=>p.id===id);
@@ -2271,31 +2353,33 @@ async function openEditProjectModal(id) {
     const modal = document.getElementById('editProjectModal');
     if (!modal) return;
     const sv = (elId,v) => { const el=document.getElementById(elId); if(el) el.value=v||''; };
-    sv('editProjId',         proj.id);
-    sv('editProjName',       proj.name);
-    sv('editProjCode',       proj.code);
-    sv('editProjStatus',     proj.status);
-    sv('editProjPriority',   proj.priority);
-    sv('editProjUrgency',    proj.urgency);
-    sv('editProjDeadline',   proj.deadline);
-    sv('editProjDept',       proj.departmentName||proj.department_name||'');
-    sv('editProjDescription',proj.description||'');
+    sv('editProjectId',       proj.id);
+    sv('editProjectName',     proj.name);
+    sv('editProjectDesc',     proj.description||'');
+    sv('editProjectStatus',   proj.status);
+    sv('editProjectPriority', proj.priority);
+    sv('editProjectUrgency',  proj.urgency||'medium');
+    sv('editProjectDeadline', proj.deadline);
+    // Populate dept dropdown from real DB data then set current value
+    populateDeptFilter('editProjectDept', allDepartments);
+    sv('editProjectDept', proj.departmentName||proj.department_name||'');
     modal.classList.add('active');
 }
 
 async function handleAddProject(event) {
     event.preventDefault();
-    const name  = document.getElementById('newProjName')?.value?.trim();
-    const dept  = document.getElementById('newProjDept')?.value?.trim();
-    const priority = document.getElementById('newProjPriority')?.value || 'medium';
-    const urgency  = document.getElementById('newProjUrgency')?.value  || 'medium';
-    const deadline = document.getElementById('newProjDeadline')?.value;
-    const desc  = document.getElementById('newProjDescription')?.value?.trim();
-    if (!name || !dept || !deadline) { showToast('Name, dept and deadline are required ❌', 'error'); return; }
+    const name     = document.getElementById('newProjectName')?.value?.trim();
+    const desc     = document.getElementById('newProjectDesc')?.value?.trim();
+    const dept     = document.getElementById('newProjectDept')?.value?.trim();
+    const priority = document.getElementById('newProjectPriority')?.value || 'medium';
+    const urgency  = document.getElementById('newProjectUrgency')?.value  || 'medium';
+    const deadline = document.getElementById('newProjectEnd')?.value;
+    if (!name || !deadline) { showToast('Name and deadline are required ❌', 'error'); return; }
     try {
-        await api('POST', '/projects', { name, departmentName: dept, priority, urgency, deadline, description: desc, requestorId: currentUser?.id, requestorName: currentUser?.name });
+        await api('POST', '/projects', { name, description: desc, departmentName: dept, priority, urgency, deadline, requestorId: currentUser?.id, requestorName: currentUser?.name });
         closeModal('addProjectModal');
-        ['newProjName','newProjDept','newProjDeadline','newProjDescription'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+        ['newProjectName','newProjectDesc','newProjectEnd'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+        const deptSel = document.getElementById('newProjectDept'); if(deptSel) deptSel.selectedIndex=0;
         const fresh = await api('GET', '/projects').catch(()=>({ data:allProjects }));
         allProjects = fresh.data || allProjects;
         renderAdminProjects();
@@ -2308,14 +2392,14 @@ async function handleAddProject(event) {
 
 async function handleEditProject(event) {
     event.preventDefault();
-    const id       = parseInt(document.getElementById('editProjId')?.value);
-    const name     = document.getElementById('editProjName')?.value?.trim();
-    const status   = document.getElementById('editProjStatus')?.value;
-    const priority = document.getElementById('editProjPriority')?.value;
-    const urgency  = document.getElementById('editProjUrgency')?.value;
-    const deadline = document.getElementById('editProjDeadline')?.value;
-    const dept     = document.getElementById('editProjDept')?.value?.trim();
-    const desc     = document.getElementById('editProjDescription')?.value?.trim();
+    const id       = parseInt(document.getElementById('editProjectId')?.value);
+    const name     = document.getElementById('editProjectName')?.value?.trim();
+    const desc     = document.getElementById('editProjectDesc')?.value?.trim();
+    const status   = document.getElementById('editProjectStatus')?.value;
+    const priority = document.getElementById('editProjectPriority')?.value;
+    const urgency  = document.getElementById('editProjectUrgency')?.value;
+    const deadline = document.getElementById('editProjectDeadline')?.value;
+    const dept     = document.getElementById('editProjectDept')?.value?.trim();
     try {
         await api('PUT', `/projects/${id}`, { name, status, priority, urgency, deadline, departmentName: dept, description: desc, requestorId: currentUser?.id, requestorName: currentUser?.name });
         const fresh = await api('GET', '/projects').catch(()=>({ data:allProjects }));
@@ -2965,7 +3049,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initTiltCards();
     initSectionScramble();
     initOrbitRings();
-    notificationsList = [...mockNotifications];
+    // notificationsList already initialised as [] at top; loadNotifications() fills it after login
     updateNotifBadges();
     setTimeout(animateCounters, 500);
 });
@@ -3032,6 +3116,7 @@ window.handleAddComment = addProjectComment;
 
 window.toggleAssignEmployee = toggleAssignEmployee;
 window.confirmManagerAssign = confirmManagerAssign;
+window.deleteProjectComment = deleteProjectComment;
 
 async function loadProjectsFromDB() {
     try { const r = await api('GET','/projects'); allProjects = r.data||[]; renderManagerProjects&&renderManagerProjects(); } catch(e){console.warn(e);}
