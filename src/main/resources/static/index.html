@@ -530,7 +530,7 @@
     <main class="main-content">
         <div class="top-bar">
             <div class="top-bar-left"><button class="btn-icon hamburger" onclick="toggleSidebar()">☰</button><div class="breadcrumb"><span>Dashboard</span><span>/</span><span id="currentView">Overview</span></div></div>
-            <div class="top-bar-right"><button class="btn-icon notif-btn" onclick="openNotifications()">🔔<span class="notification-badge" id="empNotifBadge">3</span></button><button class="theme-toggle" onclick="toggleTheme()"><span class="theme-icon">🌙</span></button></div>
+            <div class="top-bar-right"><button class="btn-icon notif-btn" onclick="openMessaging()" title="Messages" style="position:relative">✉️<span class="notification-badge" id="empMsgBadge" style="display:none">0</span></button><button class="btn-icon notif-btn" onclick="openNotifications()">🔔<span class="notification-badge" id="empNotifBadge">3</span></button><button class="theme-toggle" onclick="toggleTheme()"><span class="theme-icon">🌙</span></button></div>
         </div>
         <div id="employee-overview" class="view-content">
             <div class="page-header"><div><h1>Welcome Back, <span id="empName">John Doe</span></h1><p>Here's your project activity for today</p></div></div>
@@ -609,6 +609,13 @@
                     <span class="skill-tag skill-tag-primary">React</span><span class="skill-tag skill-tag-success">Node.js</span><span class="skill-tag skill-tag-warning">Python</span><span class="skill-tag skill-tag-info">Docker</span><span class="skill-tag skill-tag-primary">AWS</span>
                 </div>
             </div>
+            <div class="card card-modern" id="empPasswordCard">
+                <h3 class="card-title" style="margin-bottom:1rem">🔒 Change Password</h3>
+                <div class="form-group"><label>Current Password</label><input type="password" id="pwCurrent" class="form-control" placeholder="Enter current password"></div>
+                <div class="form-group"><label>New Password</label><input type="password" id="pwNew" class="form-control" placeholder="At least 6 characters"></div>
+                <div class="form-group"><label>Confirm New Password</label><input type="password" id="pwConfirm" class="form-control" placeholder="Repeat new password"></div>
+                <button class="btn btn-primary btn-glow" onclick="changePassword(currentUser?.id)">Update Password 🔒</button>
+            </div>
         </div>
     </main>
 </div>
@@ -635,7 +642,7 @@
     <main class="main-content">
         <div class="top-bar">
             <div class="top-bar-left"><button class="btn-icon hamburger" onclick="toggleSidebar()">☰</button><div class="breadcrumb"><span>Dashboard</span><span>/</span><span id="managerView">Overview</span></div></div>
-            <div class="top-bar-right"><button class="btn-icon notif-btn" onclick="openNotifications()">🔔<span class="notification-badge" id="mgrNotifBadge">5</span></button><button class="theme-toggle" onclick="toggleTheme()"><span class="theme-icon">🌙</span></button></div>
+            <div class="top-bar-right"><button class="btn-icon notif-btn" onclick="openMessaging()" title="Messages" style="position:relative">✉️<span class="notification-badge" id="mgrMsgBadge" style="display:none">0</span></button><button class="btn-icon notif-btn" onclick="openNotifications()">🔔<span class="notification-badge" id="mgrNotifBadge">5</span></button><button class="theme-toggle" onclick="toggleTheme()"><span class="theme-icon">🌙</span></button></div>
         </div>
         <div id="manager-overview" class="view-content">
             <div class="page-header"><div><h1>Welcome, <span id="mgrName">Manager</span> </h1><p>Comprehensive team and project oversight for your department</p></div><div class="page-header-actions"><button class="btn btn-secondary" onclick="exportData('manager-report')">📥 Generate Report</button></div></div>
@@ -715,7 +722,7 @@
     <main class="main-content">
         <div class="top-bar">
             <div class="top-bar-left"><button class="btn-icon hamburger" onclick="toggleSidebar()">☰</button><div class="breadcrumb"><span>Dashboard</span><span>/</span><span id="hrView">Overview</span></div></div>
-            <div class="top-bar-right"><button class="btn-icon notif-btn" onclick="openNotifications()">🔔<span class="notification-badge" id="hrNotifBadge">2</span></button><button class="theme-toggle" onclick="toggleTheme()"><span class="theme-icon">🌙</span></button></div>
+            <div class="top-bar-right"><button class="btn-icon notif-btn" onclick="openMessaging()" title="Messages" style="position:relative">✉️<span class="notification-badge" id="hrMsgBadge" style="display:none">0</span></button><button class="btn-icon notif-btn" onclick="openNotifications()">🔔<span class="notification-badge" id="hrNotifBadge">2</span></button><button class="theme-toggle" onclick="toggleTheme()"><span class="theme-icon">🌙</span></button></div>
         </div>
         <div id="hr-overview" class="view-content">
             <div class="page-header"><div><h1>HR Dashboard — <span id="hrName">HR Manager</span></h1><p>Resource allocation and workforce management overview</p></div><button class="btn btn-secondary" onclick="exportData('hr-report')">📥 Export</button></div>
@@ -816,7 +823,7 @@
     <main class="main-content">
         <div class="top-bar">
             <div class="top-bar-left"><button class="btn-icon hamburger" onclick="toggleSidebar()">☰</button><div class="breadcrumb"><span>Dashboard</span><span>/</span><span id="adminView">Overview</span></div></div>
-            <div class="top-bar-right"><button class="btn-icon notif-btn" onclick="openNotifications()">🔔<span class="notification-badge" id="adminNotifBadge">2</span></button><button class="theme-toggle" onclick="toggleTheme()"><span class="theme-icon">🌙</span></button></div>
+            <div class="top-bar-right"><button class="btn-icon notif-btn" onclick="openMessaging()" title="Messages" style="position:relative">✉️<span class="notification-badge" id="adminMsgBadge" style="display:none">0</span></button><button class="btn-icon notif-btn" onclick="openNotifications()">🔔<span class="notification-badge" id="adminNotifBadge">2</span></button><button class="theme-toggle" onclick="toggleTheme()"><span class="theme-icon">🌙</span></button></div>
         </div>
         <div id="admin-overview" class="view-content">
             <div class="page-header"><div><h1>System Administration — <span id="adminName">Admin</span></h1><p>System-wide management, monitoring, and configuration</p></div><button class="btn btn-secondary" onclick="exportData('admin-report')">📥 System Report</button></div>
@@ -1074,3 +1081,63 @@ function addNewSkill() {
 }
 
 // Tab switching is handled by script.js (window.switchFeaturedTab)
+
+</script>
+
+<!-- ==================== GLOBAL MESSAGING MODAL ==================== -->
+<div id="messagingModal" class="modal" style="z-index:9999">
+  <div class="modal-backdrop" onclick="closeModal('messagingModal')"></div>
+  <div class="modal-content modal-modern" style="max-width:860px;width:95vw;height:80vh;display:flex;flex-direction:column;padding:0;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:1.25rem 1.5rem;border-bottom:1px solid var(--border);flex-shrink:0">
+      <div><h2 style="margin:0;font-size:1.2rem">✉️ Messages</h2><p style="margin:0;font-size:0.8rem;color:var(--text-secondary)" id="msgModalSubtitle">Your inbox &amp; conversations</p></div>
+      <div style="display:flex;gap:0.5rem;align-items:center">
+        <button class="btn btn-primary btn-glow" style="padding:0.4rem 0.9rem;font-size:0.82rem" onclick="openComposeMessage()">✏️ Compose</button>
+        <button class="modal-close" style="position:static;font-size:1.4rem;background:none;border:none;cursor:pointer;color:var(--text-secondary)" onclick="closeModal('messagingModal')">×</button>
+      </div>
+    </div>
+    <div style="display:flex;flex:1;min-height:0">
+      <!-- Sidebar: conversation list -->
+      <div style="width:260px;flex-shrink:0;border-right:1px solid var(--border);overflow-y:auto;background:var(--bg-secondary)" id="msgConvList">
+        <div style="padding:0.75rem 1rem;font-size:0.75rem;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.05em">Conversations</div>
+        <div id="msgConvListBody" style="padding:0 0.5rem 1rem"></div>
+      </div>
+      <!-- Main: thread view -->
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div id="msgThreadArea" style="flex:1;overflow-y:auto;padding:1.25rem">
+          <div style="text-align:center;color:var(--text-secondary);padding-top:3rem">
+            <div style="font-size:2.5rem;margin-bottom:0.5rem">✉️</div>
+            <p>Select a conversation or compose a new message</p>
+          </div>
+        </div>
+        <div id="msgReplyBar" style="display:none;padding:0.75rem 1rem;border-top:1px solid var(--border);flex-shrink:0;background:var(--bg-secondary)">
+          <div style="display:flex;gap:0.5rem">
+            <textarea id="msgReplyText" rows="2" style="flex:1;resize:none;background:var(--input-bg,var(--bg-card));border:1px solid var(--border);border-radius:8px;padding:0.6rem;color:var(--text-primary);font-size:0.875rem" placeholder="Write a reply…"></textarea>
+            <button class="btn btn-primary btn-glow" style="align-self:flex-end;padding:0.5rem 1rem" onclick="sendMsgReply()">Send ➤</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Compose new message modal -->
+<div id="composeModal" class="modal" style="z-index:10000">
+  <div class="modal-backdrop" onclick="closeModal('composeModal')"></div>
+  <div class="modal-content modal-modern" style="max-width:500px">
+    <button class="modal-close" onclick="closeModal('composeModal')">×</button>
+    <div class="modal-header-modern"><h2>✏️ New Message</h2><p>Send a message to a colleague</p></div>
+    <div class="form-group">
+      <label>To</label>
+      <select id="composeTo" class="form-control"></select>
+    </div>
+    <div class="form-group">
+      <label>Subject</label>
+      <input type="text" id="composeSubject" class="form-control" placeholder="e.g. Project update, Question…">
+    </div>
+    <div class="form-group">
+      <label>Message</label>
+      <textarea id="composeBody" rows="5" class="form-control" style="resize:vertical" placeholder="Write your message…"></textarea>
+    </div>
+    <button class="btn btn-primary btn-block btn-glow" onclick="sendComposedMessage()">Send Message 📤</button>
+  </div>
+</div>

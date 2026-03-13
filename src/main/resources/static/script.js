@@ -289,6 +289,21 @@ function showView(role, view, element) {
 
 // ── Utility Helpers ──────────────────────────────────────────
 function daysUntil(dateStr) { return Math.ceil((new Date(dateStr) - new Date()) / 86400000); }
+
+/** Parse skills from any format the backend might return */
+function parseSkills(raw) {
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw.filter(Boolean);
+    if (typeof raw === 'string') {
+        const trimmed = raw.trim();
+        if (trimmed.startsWith('[')) {
+            try { return JSON.parse(trimmed).filter(Boolean); } catch {}
+        }
+        // comma-separated plain string
+        return trimmed.split(',').map(s => s.trim()).filter(Boolean);
+    }
+    return [];
+}
 function formatTime(ts) {
     if (!ts) return '';
     const d = new Date(ts);
@@ -551,7 +566,7 @@ function renderEmployeeProfile(user) {
     const sc = document.getElementById('profileSkills');
     if (sc) {
         let skills = u.skills;
-        if (typeof skills === 'string') try { skills = JSON.parse(skills); } catch { skills = []; }
+        skills = parseSkills(skills);
         const colors = ['primary','success','warning','info','secondary'];
         sc.innerHTML = (skills||[]).map((s,i)=>`<span class="skill-tag skill-tag-${colors[i%colors.length]}">${s}</span>`).join('') || '<span style="color:var(--text-secondary)">No skills listed</span>';
     }
@@ -869,22 +884,13 @@ async function addProjectComment(projectId, role) {
 // ── Delete a comment (manager/HR can delete their own comments) + log action ──
 async function deleteProjectComment(commentId, projectId, role) {
     if (!confirm('Delete this comment? This action cannot be undone.')) return;
-    // Optimistically hide
     const row = document.getElementById(`cmt-${commentId}`);
     if (row) row.style.opacity = '0.4';
     try {
-        await api('DELETE', `/comments/${commentId}`, { deleterId: currentUser?.id, deleterName: currentUser?.name });
+        // Try /projects/{projectId}/comments/{commentId} first, fall back to /comments/{commentId}
+        await api('DELETE', `/projects/${projectId}/comments/${commentId}`)
+            .catch(()=> api('DELETE', `/comments/${commentId}`, { deleterId: currentUser?.id }));
         showToast('Comment deleted ✓');
-        // Record deletion in audit log / activity log
-        const today = new Date().toISOString().split('T')[0];
-        await api('POST', '/activities', {
-            userId:       currentUser.id,
-            personName:   currentUser.name,
-            action:       `${currentUser.name} deleted a comment from project #${projectId}`,
-            activityDate: today,
-            type:         'delete'
-        }).catch(() => {});
-        // Refresh the project detail panel so comments list updates
         await openProjectDetail(projectId, role);
     } catch (e) {
         if (row) row.style.opacity = '1';
@@ -1523,7 +1529,7 @@ async function viewEmployeeDetail(id, role) {
         : 0;
     const wc = (emp.workload||0)>=75?'danger':(emp.workload||0)>=50?'warning':'success';
     let skills = emp.skills;
-    if (typeof skills === 'string') try { skills = JSON.parse(skills); } catch { skills = []; }
+    skills = parseSkills(skills);
 
     // Compute project count from allProjects if not in emp
     const empProjectCount = emp.projectCount ?? emp.project_count
@@ -1822,17 +1828,17 @@ function backToProjectSelection() {
 async function confirmDeptAssignment() {
     if (!_hrSelectedProject) { showToast('No project selected ⚠️', 'error'); return; }
     if (!_selectedDeptNames.length) { showToast('Please select at least one department ⚠️', 'error'); return; }
+    const deptName = _selectedDeptNames[0]; // project has one department_name column
     try {
-        await api('POST', `/projects/${_hrSelectedProject.id}/departments`, {
-            departments: _selectedDeptNames,
-            assignedBy: currentUser?.id,
-            assignedByName: currentUser?.name
+        // Use PUT /projects/{id} to set departmentName + activate project
+        await api('PUT', `/projects/${_hrSelectedProject.id}`, {
+            departmentName: deptName,
+            department_name: deptName,
+            status: 'active'
         });
-        showToast(`Project assigned to ${_selectedDeptNames.length} department(s) ✓`);
-        // Record HR assignment activity in DB
-        await recordHRAction('assign', `Assigned project to departments: ${_selectedDeptNames.join(', ')}`, _hrSelectedProject.id);
+        showToast(`Project assigned to ${deptName} ✓`);
         const projRes = await api('GET', '/projects');
-        allProjects = projRes.data || [];
+        allProjects = projRes.data || allProjects;
         backToProjectSelection();
         renderAssignmentProjects();
     } catch (e) {
@@ -1931,10 +1937,15 @@ async function openHRManageProjectModal(projectId) {
 
 async function hrRemoveDeptFromProject(projectId, deptName) {
     try {
-        await api('DELETE', `/projects/${projectId}/departments`, { department: deptName, requestedBy: currentUser?.id });
+        // Clear the department assignment via PUT /projects/{id}
+        await api('PUT', `/projects/${projectId}`, {
+            departmentName: '',
+            department_name: '',
+            status: 'unassigned'
+        });
         showToast(`${deptName} removed ✓`);
         const projRes = await api('GET', '/projects');
-        allProjects = projRes.data || [];
+        allProjects = projRes.data || allProjects;
         closeModal('hrManageProjectModal');
         await openHRManageProjectModal(projectId);
     } catch (e) {
@@ -1946,10 +1957,14 @@ async function hrAddDeptToProject(projectId) {
     const deptName = document.getElementById('hrAddDeptSelect')?.value;
     if (!deptName) { showToast('Please select a department ⚠️', 'error'); return; }
     try {
-        await api('POST', `/projects/${projectId}/departments`, { departments: [deptName], assignedBy: currentUser?.id });
+        await api('PUT', `/projects/${projectId}`, {
+            departmentName: deptName,
+            department_name: deptName,
+            status: 'active'
+        });
         showToast(`${deptName} added ✓`);
         const projRes = await api('GET', '/projects');
-        allProjects = projRes.data || [];
+        allProjects = projRes.data || allProjects;
         closeModal('hrManageProjectModal');
         await openHRManageProjectModal(projectId);
     } catch (e) {
@@ -2238,7 +2253,7 @@ async function openEditUserModal(userId) {
     sv('editUserHours',       user.hoursPerWeek||user.hours_per_week||'');
     // Populate skills field
     let skills = user.skills;
-    if (typeof skills === 'string') try { skills = JSON.parse(skills); } catch { skills = []; }
+    skills = parseSkills(skills);
     sv('editUserSkills', Array.isArray(skills) ? skills.join(', ') : (skills||''));
     modal.classList.add('active');
 }
@@ -2260,14 +2275,16 @@ async function handleAddUser(event) {
     try {
         await api('POST', '/users', {
             name, email, role,
-            departmentName: dept,
+            departmentName:  dept,
+            department_name: dept,
             username, password,
             joinDate,
+            join_date:        joinDate,
             hoursPerWeek,
+            hours_per_week:   hoursPerWeek,
             performanceScore: perfScore,
-            skills: JSON.stringify(skills),
-            requestorId:   currentUser?.id,
-            requestorName: currentUser?.name
+            performance_score: perfScore,
+            skills: skills   // send as array; backend stores as JSON column
         });
         closeModal('addUserModal');
         // Clear the form fields
@@ -2296,19 +2313,20 @@ async function handleEditUser(event) {
     const hoursRaw = document.getElementById('editUserHours')?.value;
     const password = document.getElementById('editUserPassword')?.value || '';
     const skillsRaw= document.getElementById('editUserSkills')?.value?.trim() || '';
-    const skills   = skillsRaw ? skillsRaw.split(',').map(s=>s.trim()).filter(Boolean) : [];
-    const payload  = {
-        name, email, role, departmentName: dept,
-        requestorId:   currentUser?.id,
-        requestorName: currentUser?.name
-    };
-    if (perfRaw  !== '') payload.performanceScore = parseInt(perfRaw);
-    if (hoursRaw !== '') payload.hoursPerWeek     = parseInt(hoursRaw);
-    if (password)        payload.password         = password;
-    if (skillsRaw)       payload.skills           = JSON.stringify(skills);
+    const skills   = skillsRaw ? skillsRaw.split(',').map(s=>s.trim()).filter(Boolean) : null;
+    // Send only core fields the backend accepts (camelCase + snake_case both)
+    const payload = { name, email, role, department_name: dept, departmentName: dept };
+    if (perfRaw  !== '') { payload.performance_score  = parseInt(perfRaw);  payload.performanceScore = parseInt(perfRaw); }
+    if (hoursRaw !== '') { payload.hours_per_week     = parseInt(hoursRaw); payload.hoursPerWeek     = parseInt(hoursRaw); }
+    if (skills !== null) { payload.skills = skills; } // send as array, not JSON string
     try {
         await api('PUT', `/users/${id}`, payload);
-        // Refetch fresh from DB to confirm the update is persisted
+        // Change password separately if provided
+        if (password) {
+            await api('PUT', `/users/${id}/password`, { password }).catch(()=>
+                api('PATCH', `/users/${id}`, { password }).catch(()=>{})
+            );
+        }
         const fresh = await api('GET', '/users').catch(()=>({ data:allUsers }));
         allUsers = fresh.data || allUsers;
         closeModal('editUserModal');
@@ -2355,7 +2373,21 @@ async function renderAdminProjects() {
     if (status !== 'all') projects = projects.filter(p=>p.status===status);
     if (dept   !== 'all') projects = projects.filter(p=>(p.departmentName||p.department_name)===dept);
     const sc = { active:'success', completed:'info', delayed:'danger', unassigned:'warning', archived:'secondary' };
-    container.innerHTML = projects.map(p=>`
+    // Fetch team counts per project from assignments endpoint
+    let teamCounts = {};
+    try {
+        const aRes = await api('GET', '/assignments').catch(()=>null);
+        if (aRes?.data) {
+            aRes.data.forEach(a => {
+                const pid = a.projectId || a.project_id;
+                teamCounts[pid] = (teamCounts[pid] || 0) + 1;
+            });
+        }
+    } catch {}
+    container.innerHTML = projects.map(p => {
+        const teamCount = teamCounts[p.id] ?? (p.team||[]).length;
+        const isArchived = p.status === 'archived';
+        return `
         <tr>
             <td>${p.code}</td>
             <td>${p.name}</td>
@@ -2364,15 +2396,16 @@ async function renderAdminProjects() {
             <td><span class="badge badge-${p.priority==='critical'?'danger':p.priority==='high'?'warning':'info'}">${p.priority}</span></td>
             <td><div class="progress-bar" style="width:80px;display:inline-block"><div class="progress-fill" style="width:${p.progress}%"></div></div> ${p.progress}%</td>
             <td>${p.deadline||'—'}</td>
-            <td>${(p.team||[]).length}</td>
+            <td>${teamCount}</td>
             <td>
                 <div class="action-buttons">
                     <button class="btn btn-sm btn-secondary" onclick="openEditProjectModal(${p.id})" title="Edit">✏️</button>
-                    <button class="btn btn-sm btn-warning"   onclick="archiveProject(${p.id})"       title="Archive">📦</button>
+                    <button class="btn btn-sm btn-warning"   onclick="archiveProject(${p.id})"       title="${isArchived?'Unarchive':'Archive'}">${isArchived?'📤':'📦'}</button>
                     <button class="btn btn-sm btn-danger"    onclick="confirmDeleteProject(${p.id})" title="Delete">🗑️</button>
                 </div>
             </td>
-        </tr>`).join('');
+        </tr>`;
+    }).join('');
     if (!projects.length) container.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);padding:2rem">No projects found</td></tr>';
 }
 
@@ -2454,14 +2487,17 @@ async function handleEditProject(event) {
 async function archiveProject(id) {
     const p = allProjects.find(p=>p.id===id);
     if (!p) return;
-    if (!confirm(`Archive project "${p.name}"? It will be marked as archived in the DB.`)) return;
+    const isArchived = p.status === 'archived';
+    const newStatus  = isArchived ? 'active' : 'archived';
+    const label      = isArchived ? 'Unarchive' : 'Archive';
+    if (!confirm(`${label} project "${p.name}"?`)) return;
     try {
-        await api('PUT', `/projects/${id}`, { status: 'archived', requestorId: currentUser?.id, requestorName: currentUser?.name });
+        await api('PUT', `/projects/${id}`, { status: newStatus });
         const fresh = await api('GET', '/projects').catch(()=>({ data:allProjects }));
         allProjects = fresh.data || allProjects;
         renderAdminProjects();
         renderAdminStats();
-        showToast(`Project archived ✓`);
+        showToast(`Project ${label.toLowerCase()}d ✓`);
     } catch (e) {
         showToast(`Failed: ${e.message}`, 'error');
     }
@@ -2677,7 +2713,7 @@ function exportEmployeeReport(empId) {
     const e = allUsers.find(u=>u.id===empId);
     if (!e) return;
     let skills = e.skills;
-    if (typeof skills === 'string') try { skills = JSON.parse(skills); } catch { skills = []; }
+    skills = parseSkills(skills);
     const csv = `Employee Report\nName,${e.name}\nID,${e.employeeId||e.employee_id}\nDept,${e.departmentName||e.department_name}\nPerformance,${e.performanceScore||e.performance_score}%\nWorkload,${e.workload}%\n\nSkills\n${(skills||[]).join('\n')}`;
     downloadCSV(csv, `${e.employeeId||e.employee_id}_report.csv`);
     showToast(`${e.name} report exported ✓`);
@@ -3160,6 +3196,36 @@ window.renderHRProfile      = renderHRProfile;
 window.renderAdminProfile   = renderAdminProfile;
 
 // ============================================================
+//  PASSWORD CHANGE (available to all roles from profile)
+// ============================================================
+async function changePassword(userId) {
+    const cur  = document.getElementById('pwCurrent')?.value;
+    const nw   = document.getElementById('pwNew')?.value;
+    const conf = document.getElementById('pwConfirm')?.value;
+    if (!cur || !nw)      { showToast('Please fill in all fields ⚠️', 'error'); return; }
+    if (nw !== conf)      { showToast('New passwords do not match ⚠️', 'error'); return; }
+    if (nw.length < 6)    { showToast('Password must be at least 6 characters', 'error'); return; }
+    try {
+        await api('PUT', `/users/${userId}/password`, { currentPassword: cur, password: nw, newPassword: nw })
+            .catch(()=> api('PUT', `/users/${userId}`, { password: nw }));
+        ['pwCurrent','pwNew','pwConfirm'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+        showToast('Password changed successfully 🔒');
+    } catch(e) { showToast(`Failed: ${e.message}`, 'error'); }
+}
+window.changePassword = changePassword;
+
+function _passwordCard(userId) {
+    return `
+    <div class="card card-modern" style="margin-top:0">
+        <h3 class="card-title" style="margin-bottom:1rem">🔒 Change Password</h3>
+        <div class="form-group"><label>Current Password</label><input type="password" id="pwCurrent" class="form-control" placeholder="Enter current password"></div>
+        <div class="form-group"><label>New Password</label><input type="password" id="pwNew" class="form-control" placeholder="At least 6 characters"></div>
+        <div class="form-group"><label>Confirm New Password</label><input type="password" id="pwConfirm" class="form-control" placeholder="Repeat new password"></div>
+        <button class="btn btn-primary btn-glow" onclick="changePassword(${userId})">Update Password 🔒</button>
+    </div>`;
+}
+
+// ============================================================
 //  PROFILE PAGES — MANAGER / HR / ADMIN
 // ============================================================
 function renderManagerProfile() {
@@ -3167,12 +3233,19 @@ function renderManagerProfile() {
     if (!u) return;
     const container = document.getElementById('manager-profile');
     if (!container) return;
+    // Refresh users from DB so new employees appear
+    api('GET', '/users').then(r => {
+        if (r?.data) allUsers = r.data;
+        _renderManagerProfileContent(container, u);
+    }).catch(()=> _renderManagerProfileContent(container, u));
+}
+function _renderManagerProfileContent(container, u) {
     const roleLabel = 'Manager';
     const teamEmps  = allUsers.filter(e=>e.role==='employee');
     const activeProjects = allProjects.filter(p=>p.status==='active').length;
     const completedProjects = allProjects.filter(p=>p.status==='completed').length;
     let skills = u.skills;
-    if (typeof skills === 'string') try { skills = JSON.parse(skills); } catch { skills = []; }
+    skills = parseSkills(skills);
     const colors = ['primary','success','warning','info','secondary'];
     const skillsHTML = (skills||[]).map((s,i)=>`<span class="skill-tag skill-tag-${colors[i%colors.length]}">${s}</span>`).join('')
         || '<span style="color:var(--text-secondary)">No skills listed</span>';
@@ -3220,7 +3293,8 @@ function renderManagerProfile() {
                 <td><span class="badge badge-${e.status==='active'?'success':'danger'}">${e.status}</span></td>
             </tr>`).join('')||'<tr><td colspan="5" style="text-align:center;color:var(--text-secondary);padding:2rem">No team members found</td></tr>'}</tbody>
         </table></div>
-    </div>`;
+    </div>
+    ${_passwordCard(u.id)}`;
 }
 
 function renderHRProfile() {
@@ -3233,7 +3307,7 @@ function renderHRProfile() {
     const deptCount = allDepartments.length;
     const activeProj = allProjects.filter(p=>p.status==='active').length;
     let skills = u.skills;
-    if (typeof skills === 'string') try { skills = JSON.parse(skills); } catch { skills = []; }
+    skills = parseSkills(skills);
     const colors = ['primary','success','warning','info','secondary'];
     const skillsHTML = (skills||[]).map((s,i)=>`<span class="skill-tag skill-tag-${colors[i%colors.length]}">${s}</span>`).join('')
         || '<span style="color:var(--text-secondary)">No skills listed</span>';
@@ -3286,7 +3360,8 @@ function renderHRProfile() {
                 </div>`).join('')||'<p style="color:var(--text-secondary)">No managers</p>'}
             </div>
         </div>
-    </div>`;
+    </div>
+    ${_passwordCard(u.id)}`;
 }
 
 function renderAdminProfile() {
@@ -3299,7 +3374,7 @@ function renderAdminProfile() {
     const deptCount   = allDepartments.length;
     const admins      = allUsers.filter(e=>e.role==='admin');
     let skills = u.skills;
-    if (typeof skills === 'string') try { skills = JSON.parse(skills); } catch { skills = []; }
+    skills = parseSkills(skills);
     const colors = ['primary','success','warning','info','secondary'];
     const skillsHTML = (skills||[]).map((s,i)=>`<span class="skill-tag skill-tag-${colors[i%colors.length]}">${s}</span>`).join('')
         || '<span style="color:var(--text-secondary)">No skills listed</span>';
@@ -3357,7 +3432,8 @@ function renderAdminProfile() {
                 <td><span class="badge badge-${a.status==='active'?'success':'danger'}">${a.status}</span></td>
             </tr>`).join('')||'<tr><td colspan="5" style="text-align:center;color:var(--text-secondary)">No admin data</td></tr>'}</tbody>
         </table></div>
-    </div>`;
+    </div>
+    ${_passwordCard(u.id)}`;
 }
 
 
@@ -3367,6 +3443,224 @@ async function loadProjectsFromDB() {
 async function loadEmployeesFromDB() {
     try { const r = await api('GET','/users'); allUsers = r.data||[]; } catch(e){console.warn(e);}
 }
+
+// ============================================================
+//  MESSAGING SYSTEM
+//  Rules:
+//   - Employee  → can message their Manager + HR
+//   - Manager   → can message anyone
+//   - HR        → can message anyone
+//   - Admin     → can message anyone
+// ============================================================
+
+let _msgCurrentThread = null; // { partnerId, partnerName }
+
+function _getAllowedRecipients() {
+    const me = currentUser;
+    if (!me) return [];
+    const role = me.role;
+    if (role === 'admin' || role === 'manager' || role === 'hr') {
+        // Can message everyone except themselves
+        return allUsers.filter(u => u.id !== me.id);
+    }
+    if (role === 'employee') {
+        // Can message managers + HR only
+        return allUsers.filter(u => u.id !== me.id && (u.role === 'manager' || u.role === 'hr' || u.role === 'admin'));
+    }
+    return [];
+}
+
+async function openMessaging() {
+    const modal = document.getElementById('messagingModal');
+    if (!modal) return;
+    modal.classList.add('active');
+    await loadConversations();
+}
+window.openMessaging = openMessaging;
+
+async function loadConversations() {
+    const body = document.getElementById('msgConvListBody');
+    if (!body) return;
+    body.innerHTML = '<div style="padding:1rem;color:var(--text-secondary);font-size:0.8rem">Loading…</div>';
+    try {
+        // Fetch all messages where I am sender or receiver
+        const res = await api('GET', `/messages?userId=${currentUser.id}`).catch(() =>
+            api('GET', `/messages/inbox/${currentUser.id}`).catch(() => ({ data: [] }))
+        );
+        const msgs = res?.data || [];
+
+        // Group into conversations by partner
+        const convMap = {};
+        msgs.forEach(m => {
+            const partnerId   = (m.fromId || m.from_id) === currentUser.id ? (m.toId || m.to_id) : (m.fromId || m.from_id);
+            const partnerName = (m.fromId || m.from_id) === currentUser.id ? (m.toName || m.to_name || 'Unknown') : (m.fromName || m.from_name || 'Unknown');
+            if (!convMap[partnerId]) convMap[partnerId] = { partnerId, partnerName, msgs: [], unread: 0 };
+            convMap[partnerId].msgs.push(m);
+            if (!(m.is_read || m.isRead) && (m.toId || m.to_id) === currentUser.id) convMap[partnerId].unread++;
+        });
+
+        const convs = Object.values(convMap).sort((a, b) => {
+            const ta = new Date(a.msgs[a.msgs.length-1]?.created_at || 0);
+            const tb = new Date(b.msgs[b.msgs.length-1]?.created_at || 0);
+            return tb - ta;
+        });
+
+        // Update badge count
+        const totalUnread = convs.reduce((s, c) => s + c.unread, 0);
+        ['empMsgBadge','mgrMsgBadge','hrMsgBadge','adminMsgBadge'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) { el.textContent = totalUnread; el.style.display = totalUnread ? 'flex' : 'none'; }
+        });
+
+        if (!convs.length) {
+            body.innerHTML = '<div style="padding:1rem;color:var(--text-secondary);font-size:0.8rem;text-align:center">No messages yet.<br>Compose one to get started!</div>';
+            return;
+        }
+
+        body.innerHTML = convs.map(c => {
+            const last = c.msgs[c.msgs.length - 1];
+            const preview = (last?.body || '').substring(0, 45) + ((last?.body||'').length > 45 ? '…' : '');
+            const isActive = _msgCurrentThread?.partnerId === c.partnerId;
+            return `<div class="msg-conv-item${isActive ? ' active' : ''}" onclick="openThread(${c.partnerId},'${(c.partnerName||'').replace(/'/g,"\\'")}')">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                    <div style="font-weight:${c.unread?700:500};font-size:0.875rem">${c.partnerName}</div>
+                    ${c.unread ? `<span class="badge badge-primary" style="font-size:0.65rem;padding:0.1rem 0.4rem">${c.unread}</span>` : ''}
+                </div>
+                <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:0.15rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${preview||'No messages yet'}</div>
+            </div>`;
+        }).join('');
+    } catch(e) {
+        body.innerHTML = `<div style="padding:1rem;color:var(--text-secondary);font-size:0.8rem">Could not load messages</div>`;
+    }
+}
+window.loadConversations = loadConversations;
+
+async function openThread(partnerId, partnerName) {
+    _msgCurrentThread = { partnerId, partnerName };
+    const threadArea = document.getElementById('msgThreadArea');
+    const replyBar   = document.getElementById('msgReplyBar');
+    const subtitle   = document.getElementById('msgModalSubtitle');
+    if (!threadArea) return;
+
+    // Highlight active conversation
+    document.querySelectorAll('.msg-conv-item').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.msg-conv-item').forEach(el => {
+        if (el.onclick && el.getAttribute('onclick')?.includes(partnerId)) el.classList.add('active');
+    });
+
+    if (subtitle) subtitle.textContent = `Conversation with ${partnerName}`;
+    threadArea.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-secondary)">Loading…</div>';
+    if (replyBar) replyBar.style.display = 'flex';
+
+    try {
+        const res = await api('GET', `/messages?userId=${currentUser.id}`).catch(() =>
+            api('GET', `/messages/inbox/${currentUser.id}`).catch(() => ({ data: [] }))
+        );
+        const all = res?.data || [];
+        const thread = all.filter(m => {
+            const fid = m.fromId || m.from_id;
+            const tid = m.toId   || m.to_id;
+            return (fid === currentUser.id && tid === partnerId) ||
+                   (fid === partnerId      && tid === currentUser.id);
+        }).sort((a, b) => new Date(a.created_at||0) - new Date(b.created_at||0));
+
+        // Mark unread as read
+        const unread = thread.filter(m => !(m.is_read||m.isRead) && (m.toId||m.to_id) === currentUser.id);
+        unread.forEach(m => api('PUT', `/messages/${m.id}/read`).catch(()=>{}));
+
+        if (!thread.length) {
+            threadArea.innerHTML = `<div style="text-align:center;padding:3rem;color:var(--text-secondary)">
+                <div style="font-size:2rem;margin-bottom:0.5rem">💬</div>
+                <p>No messages yet. Send the first one!</p></div>`;
+        } else {
+            threadArea.innerHTML = thread.map(m => {
+                const isMine = (m.fromId || m.from_id) === currentUser.id;
+                const time   = m.created_at ? new Date(m.created_at).toLocaleString() : '';
+                return `<div style="display:flex;flex-direction:column;align-items:${isMine?'flex-end':'flex-start'};margin-bottom:1rem">
+                    <div style="max-width:75%;background:${isMine?'var(--primary)':'var(--bg-secondary)'};color:${isMine?'#fff':'var(--text-primary)'};padding:0.65rem 0.9rem;border-radius:${isMine?'12px 12px 2px 12px':'12px 12px 12px 2px'};font-size:0.875rem;line-height:1.4">
+                        ${m.subject ? `<div style="font-weight:600;margin-bottom:0.25rem;font-size:0.8rem;opacity:0.85">${m.subject}</div>` : ''}
+                        ${m.body||''}
+                    </div>
+                    <div style="font-size:0.7rem;color:var(--text-secondary);margin-top:0.2rem">${isMine?'You':partnerName} · ${time}</div>
+                </div>`;
+            }).join('');
+            threadArea.scrollTop = threadArea.scrollHeight;
+        }
+
+        // Refresh conversation list badges
+        await loadConversations();
+    } catch(e) {
+        threadArea.innerHTML = `<div style="color:var(--text-secondary);padding:1rem">Could not load thread: ${e.message}</div>`;
+    }
+}
+window.openThread = openThread;
+
+async function sendMsgReply() {
+    if (!_msgCurrentThread) return;
+    const text = document.getElementById('msgReplyText')?.value?.trim();
+    if (!text) { showToast('Write a message first ⚠️', 'error'); return; }
+    try {
+        await api('POST', '/messages', {
+            fromId: currentUser.id, toId: _msgCurrentThread.partnerId,
+            subject: `Re: message`, body: text
+        });
+        document.getElementById('msgReplyText').value = '';
+        await openThread(_msgCurrentThread.partnerId, _msgCurrentThread.partnerName);
+        showToast('Message sent ✓');
+    } catch(e) { showToast(`Send failed: ${e.message}`, 'error'); }
+}
+window.sendMsgReply = sendMsgReply;
+
+function openComposeMessage() {
+    const modal = document.getElementById('composeModal');
+    if (!modal) return;
+    const sel = document.getElementById('composeTo');
+    if (sel) {
+        const recipients = _getAllowedRecipients();
+        sel.innerHTML = recipients.map(u =>
+            `<option value="${u.id}">${u.name} (${u.role})</option>`
+        ).join('');
+        if (!recipients.length) sel.innerHTML = '<option>No recipients available</option>';
+    }
+    modal.classList.add('active');
+}
+window.openComposeMessage = openComposeMessage;
+
+async function sendComposedMessage() {
+    const toId   = parseInt(document.getElementById('composeTo')?.value);
+    const subj   = document.getElementById('composeSubject')?.value?.trim() || `Message from ${currentUser.name}`;
+    const body   = document.getElementById('composeBody')?.value?.trim();
+    if (!body)  { showToast('Write a message first ⚠️', 'error'); return; }
+    if (!toId)  { showToast('Select a recipient ⚠️', 'error'); return; }
+    try {
+        await api('POST', '/messages', { fromId: currentUser.id, toId, subject: subj, body });
+        closeModal('composeModal');
+        const partner = allUsers.find(u => u.id === toId);
+        showToast(`Message sent to ${partner?.name || 'recipient'} ✓`);
+        // Reopen thread to show the sent message
+        if (partner) {
+            _msgCurrentThread = { partnerId: toId, partnerName: partner.name };
+            await loadConversations();
+            await openThread(toId, partner.name);
+        }
+    } catch(e) { showToast(`Send failed: ${e.message}`, 'error'); }
+}
+window.sendComposedMessage = sendComposedMessage;
+
+// Legacy openMessageModal kept for manager workload quick-message buttons
+async function openMessageModal(userId) {
+    _msgCurrentThread = null;
+    const user = allUsers.find(u => u.id === userId);
+    if (!user) return;
+    await openMessaging();
+    // Auto-open that person's thread
+    setTimeout(() => openThread(userId, user.name), 300);
+}
+// sendMessage kept as alias
+async function sendMessage(userId) { openMessageModal(userId); }
+
+window.openMessageModal = openMessageModal;
+window.sendMessage      = sendMessage;
 
 window.loadProjectsFromDB = loadProjectsFromDB;
 // HR assignment
