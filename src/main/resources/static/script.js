@@ -30,6 +30,8 @@ async function api(method, endpoint, data = null) {
     let json;
     try { json = await res.json(); } catch { json = {}; }
     if (!res.ok) throw new Error(json.message || `Server error ${res.status}`);
+    // Controller returns HTTP 200 even for logic errors — check success flag
+    if (json && json.success === false && json.message) throw new Error(json.message);
     return json;
 }
 
@@ -2296,23 +2298,31 @@ async function toggleUserStatus(userId, checkbox) {
 function openAddUserModal() { document.getElementById('addUserModal')?.classList.add('active'); }
 
 async function openEditUserModal(userId) {
+    // GET /users/{id} returns { data: { user: {...}, dailyActivities: [...] } }
     const res = await api('GET', `/users/${userId}`).catch(()=>null);
-    const user = res?.data || allUsers.find(e=>e.id===userId);
-    if (!user) return;
+    // Extract nested user object — fall back to allUsers list
+    const user = res?.data?.user || res?.data || allUsers.find(e => parseInt(e.id) === parseInt(userId));
+    if (!user) { showToast('Could not load user data', 'error'); return; }
+
     const modal = document.getElementById('editUserModal');
     if (!modal) return;
-    const sv = (id,v) => { const el=document.getElementById(id); if(el) el.value=v||''; };
+
+    // Use fallbacks for all fields so existing values always show
+    const sv = (id, v) => { const el = document.getElementById(id); if (el) el.value = (v != null && v !== undefined) ? String(v) : ''; };
     sv('editUserId',          user.id);
-    sv('editUserName',        user.name);
-    sv('editUserEmail',       user.email);
-    sv('editUserRole',        user.role);
-    sv('editUserDept',        user.departmentName||user.department_name||'');
-    sv('editUserPerformance', user.performanceScore||user.performance_score||'');
-    sv('editUserHours',       user.hoursPerWeek||user.hours_per_week||'');
-    // Populate skills field
-    let skills = user.skills;
-    skills = parseSkills(skills);
-    sv('editUserSkills', Array.isArray(skills) ? skills.join(', ') : (skills||''));
+    sv('editUserName',        user.name || '');
+    sv('editUserEmail',       user.email || '');
+    // role: use the value from API (snake_case serialised, so field is "role")
+    const roleEl = document.getElementById('editUserRole');
+    if (roleEl) roleEl.value = user.role || 'employee';
+    sv('editUserDept',        user.departmentName || user.department_name || '');
+    // performance_score and hours_per_week come as snake_case from the API
+    sv('editUserPerformance', user.performance_score ?? user.performanceScore ?? '');
+    sv('editUserHours',       user.hours_per_week   ?? user.hoursPerWeek   ?? '');
+    sv('editUserPassword',    ''); // always blank for security
+    // skills stored as JSON string in DB, parse to comma-separated for display
+    sv('editUserSkills', parseSkills(user.skills).join(', '));
+
     modal.classList.add('active');
 }
 
@@ -2369,59 +2379,45 @@ async function handleEditUser(event) {
     const dept     = document.getElementById('editUserDept')?.value?.trim();
     const perfRaw  = document.getElementById('editUserPerformance')?.value?.trim();
     const hoursRaw = document.getElementById('editUserHours')?.value?.trim();
-    const password = document.getElementById('editUserPassword')?.value?.trim() || '';
     const skillsRaw= document.getElementById('editUserSkills')?.value?.trim() || '';
-    const skills   = skillsRaw ? skillsRaw.split(',').map(s=>s.trim()).filter(Boolean) : [];
 
-    // Get existing user to preserve fields backend requires (username, join_date, etc.)
-    const ex = allUsers.find(u => parseInt(u.id) === parseInt(id)) || {};
-    const username  = ex.username  || ex.email?.split('@')[0] || email?.split('@')[0] || '';
-    const joinDate  = ex.joinDate  || ex.join_date  || new Date().toISOString().split('T')[0];
-    const hoursVal  = hoursRaw ? parseInt(hoursRaw)  : (ex.hoursPerWeek  || ex.hours_per_week  || 40);
-    const perfVal   = perfRaw  ? parseInt(perfRaw)   : (ex.performanceScore || ex.performance_score || 80);
-    const deptVal   = dept     || ex.departmentName  || ex.department_name || '';
+    // Validate before sending (invalid id causes Spring 400 NumberFormatException)
+    if (!id || isNaN(id)) { showToast('Invalid user ID — close and re-open the modal', 'error'); return; }
+    if (!name)             { showToast('Name is required', 'error'); return; }
+    if (!email)            { showToast('Email is required', 'error'); return; }
+    if (!role)             { showToast('Role is required', 'error'); return; }
 
-    // The controller reads Map<String,Object> directly — keys are LITERAL camelCase strings
-    // (SNAKE_CASE Jackson strategy only affects Entity serialization, NOT Map deserialization)
-    // Fields supported by UserService.update(): name, email, role, departmentName, workload, hoursPerWeek, performanceScore
-    // UserService.update() reads: name, email, role, departmentName, workload, hoursPerWeek, performanceScore
-    // All keys are camelCase (Map<String,Object> reads literal key names, not Jackson-transformed)
+    // Resolve existing user values (fallbacks for unchanged fields)
+    const ex = allUsers.find(u => parseInt(u.id) === id) || {};
+    const hoursVal = hoursRaw ? parseInt(hoursRaw) : (ex.hours_per_week  ?? ex.hoursPerWeek  ?? 40);
+    const perfVal  = perfRaw  ? parseInt(perfRaw)  : (ex.performance_score ?? ex.performanceScore ?? 80);
+    const deptVal  = dept || ex.department_name || ex.departmentName || '';
+
+    // UserController reads Map<String,Object> with LITERAL camelCase keys
     const payload = {
         name,
         email,
         role,
         departmentName:   deptVal,
-        workload:         ex.workload || 0,
+        workload:         typeof ex.workload === 'number' ? ex.workload : 0,
         hoursPerWeek:     hoursVal,
         performanceScore: perfVal,
         requestorId:      currentUser?.id,
-        requestorName:    currentUser?.name
+        requestorName:    currentUser?.name || 'Admin'
     };
 
     try {
-        await api('PUT', `/users/${id}`, payload);
+        const res = await api('PUT', `/users/${id}`, payload);
+        // Controller wraps errors in {success:false} with HTTP 200 — check both
+        if (res?.success === false) throw new Error(res.message || 'Update rejected by server');
 
-        // Handle password: try dedicated endpoints first, then include in main PUT
-        // The last PUT /users/{id} with password field is included in case backend hashes on update
-        // Password change via dedicated endpoint only — PUT /users/{id} does NOT BCrypt the password
-        if (password) {
-            const pwAttempts = [
-                () => api('PUT',  `/users/${id}/password`,        { current_password: password, new_password: password }),
-                () => api('PUT',  `/users/${id}/password`,        { currentPassword:   password, newPassword:   password }),
-                () => api('POST', `/users/${id}/change-password`,  { current_password: password, new_password: password }),
-                () => api('POST', `/auth/change-password`,         { user_id: id, new_password: password }),
-            ];
-            for (const fn of pwAttempts) {
-                try { await fn(); break; } catch {}
-            }
-        }
-
+        // Refresh user list from DB
         const fresh = await api('GET', '/users').catch(() => ({ data: allUsers }));
         allUsers = fresh.data || allUsers;
         closeModal('editUserModal');
         renderUserManagement();
         renderAdminStats();
-        showToast(`User ${name} updated ✓`);
+        showToast(`${name} updated ✓`);
     } catch(e) {
         showToast(`Update failed: ${e.message}`, 'error');
     }
@@ -3325,9 +3321,9 @@ async function changePassword(userId) {
         ['pwCurrent','pwNew','pwConfirm',
          `pwCurrent_${userId}`,`pwNew_${userId}`,`pwConfirm_${userId}`
         ].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
-        showToast('Password update request sent. If it took effect, log in again with your new password 🔒');
+        showToast('Password change request sent ✓ — if your backend supports it, log in again with the new password');
     } else {
-        showToast(`Password update failed: ${lastErr}`, 'error');
+        showToast(`Password change not supported by this backend. Ask your developer to add PUT /users/{id}/password endpoint.`, 'error');
     }
 }
 window.changePassword = changePassword;
