@@ -193,9 +193,9 @@ async function initDashboard(role, user) {
     try {
         const usersRes = await api('GET', '/users').catch(()=>null);
         if (usersRes?.data) {
-            const activeCount = usersRes.data.filter(u=>u.status==='active').length;
+            allUsers = usersRes.data; // cache for use across app
             const el = document.getElementById('counterUsers');
-            if (el) el.textContent = activeCount;
+            if (el) el.textContent = usersRes.data.length;
         }
     } catch {}
     document.getElementById('landingPage').classList.add('hidden');
@@ -903,18 +903,10 @@ async function deleteProjectComment(commentId, projectId, role) {
     const row = document.getElementById(`cmt-${commentId}`);
     if (row) row.style.opacity = '0.4';
     try {
-        // Try all known Spring Boot comment delete patterns
-        const deleteAttempts = [
-            () => api('DELETE', `/projects/${projectId}/comments/${commentId}`),
-            () => api('DELETE', `/comments/${commentId}`),
-            () => api('DELETE', `/project-comments/${commentId}`),
-            () => api('DELETE', `/comments/${commentId}?projectId=${projectId}`),
-        ];
-        let deleted = false;
-        for (const attempt of deleteAttempts) {
-            try { await attempt(); deleted = true; break; } catch {}
-        }
-        if (!deleted) throw new Error('No working delete endpoint found');
+        // Based on build manual, the only comment endpoint is POST /api/comments
+        // DELETE is not documented - try /comments/{id} as the most likely path
+        await api('DELETE', `/comments/${commentId}`)
+            .catch(() => api('DELETE', `/projects/${projectId}/comments/${commentId}`));
         showToast('Comment deleted ✓');
         await openProjectDetail(projectId, role);
     } catch(e) {
@@ -1489,6 +1481,8 @@ async function sendMessage(employeeId) {
     if (!msg) { showToast('Please enter a message', 'error'); return; }
     try {
         await _postMessage(currentUser.id, employeeId, `Message from ${currentUser?.name||'Manager'}`, msg);
+        // Cache sent message
+        _sentMessages.push({ fromId: currentUser.id, toId: employeeId, from_id: currentUser.id, to_id: employeeId, body: msg, subject: `Message from ${currentUser?.name||'Manager'}`, is_read: true, _localTime: new Date().toISOString() });
         closeModal('tempMsgModal');
         showToast('Message sent successfully 📨');
     } catch (e) {
@@ -1861,9 +1855,15 @@ async function confirmDeptAssignment() {
     const merged = [...new Set([...existing, ..._selectedDeptNames])].join(', ');
 
     try {
-        await api('PUT', `/projects/${_hrSelectedProject.id}`, {
-            department_name: merged,
-            status: 'active'
+        const sp = _hrSelectedProject;
+        await api('PUT', `/projects/${sp.id}`, {
+            name:           sp.name,
+            status:         'active',
+            priority:       sp.priority || 'medium',
+            departmentName: merged,
+            description:    sp.description || sp.name || '',
+            requestorId:    currentUser?.id,
+            requestorName:  currentUser?.name
         });
         showToast(`Project assigned to: ${merged} ✓`);
         const projRes = await api('GET', '/projects');
@@ -1975,13 +1975,21 @@ async function openHRManageProjectModal(projectId) {
 
 async function hrRemoveDeptFromProject(projectId, deptName) {
     try {
-        const proj = allProjects.find(p => p.id === projectId);
+        const proj = allProjects.find(p => parseInt(p.id) === parseInt(projectId)) || {};
         const existing = (proj?.department_name || proj?.departmentName || '')
             .split(',').map(s => s.trim()).filter(Boolean);
         const remaining = existing.filter(d => d !== deptName);
         const newDept = remaining.join(', ');
         const newStatus = remaining.length ? 'active' : 'unassigned';
-        await api('PUT', `/projects/${projectId}`, { department_name: newDept, status: newStatus });
+        await api('PUT', `/projects/${projectId}`, {
+            name:           proj.name,
+            status:         newStatus,
+            priority:       proj.priority || 'medium',
+            departmentName: newDept,
+            description:    proj.description || proj.name || '',
+            requestorId:    currentUser?.id,
+            requestorName:  currentUser?.name
+        });
         showToast(`${deptName} removed ✓`);
         const projRes = await api('GET', '/projects');
         allProjects = projRes.data || allProjects;
@@ -1996,12 +2004,22 @@ async function hrAddDeptToProject(projectId) {
     const deptName = document.getElementById('hrAddDeptSelect')?.value;
     if (!deptName) { showToast('Please select a department ⚠️', 'error'); return; }
     try {
-        const proj = allProjects.find(p => p.id === projectId);
+        const proj = allProjects.find(p => parseInt(p.id) === parseInt(projectId)) || {};
         const existing = (proj?.department_name || proj?.departmentName || '')
             .split(',').map(s => s.trim()).filter(Boolean);
         if (existing.includes(deptName)) { showToast(`${deptName} already assigned`, 'error'); return; }
         const merged = [...existing, deptName].join(', ');
-        await api('PUT', `/projects/${projectId}`, { department_name: merged, status: 'active' });
+        // Send full project payload to avoid @NotNull validation failures on PUT
+        // ProjectService.update reads camelCase Map keys (not SNAKE_CASE)
+        await api('PUT', `/projects/${projectId}`, {
+            name:           proj.name,
+            status:         'active',
+            priority:       proj.priority || 'medium',
+            departmentName: merged,
+            description:    proj.description || proj.name || '',
+            requestorId:    currentUser?.id,
+            requestorName:  currentUser?.name
+        });
         showToast(`${deptName} added ✓`);
         const projRes = await api('GET', '/projects');
         allProjects = projRes.data || allProjects;
@@ -2356,27 +2374,28 @@ async function handleEditUser(event) {
     const skills   = skillsRaw ? skillsRaw.split(',').map(s=>s.trim()).filter(Boolean) : [];
 
     // Get existing user to preserve fields backend requires (username, join_date, etc.)
-    const ex = allUsers.find(u => u.id === id) || {};
+    const ex = allUsers.find(u => parseInt(u.id) === parseInt(id)) || {};
     const username  = ex.username  || ex.email?.split('@')[0] || email?.split('@')[0] || '';
     const joinDate  = ex.joinDate  || ex.join_date  || new Date().toISOString().split('T')[0];
     const hoursVal  = hoursRaw ? parseInt(hoursRaw)  : (ex.hoursPerWeek  || ex.hours_per_week  || 40);
     const perfVal   = perfRaw  ? parseInt(perfRaw)   : (ex.performanceScore || ex.performance_score || 80);
     const deptVal   = dept     || ex.departmentName  || ex.department_name || '';
 
-    // Send BOTH camelCase and snake_case — POST /users works with both, PUT should too
+    // The controller reads Map<String,Object> directly — keys are LITERAL camelCase strings
+    // (SNAKE_CASE Jackson strategy only affects Entity serialization, NOT Map deserialization)
+    // Fields supported by UserService.update(): name, email, role, departmentName, workload, hoursPerWeek, performanceScore
+    // UserService.update() reads: name, email, role, departmentName, workload, hoursPerWeek, performanceScore
+    // All keys are camelCase (Map<String,Object> reads literal key names, not Jackson-transformed)
     const payload = {
-        name, email, role, username,
-        // snake_case (Jackson SNAKE_CASE strategy)
-        department_name:   deptVal,
-        join_date:         joinDate,
-        hours_per_week:    hoursVal,
-        performance_score: perfVal,
-        // camelCase (in case DTO doesn't use SNAKE_CASE strategy for UPDATE endpoint)
+        name,
+        email,
+        role,
         departmentName:   deptVal,
-        joinDate:         joinDate,
+        workload:         ex.workload || 0,
         hoursPerWeek:     hoursVal,
         performanceScore: perfVal,
-        skills:           skills
+        requestorId:      currentUser?.id,
+        requestorName:    currentUser?.name
     };
 
     try {
@@ -2384,20 +2403,17 @@ async function handleEditUser(event) {
 
         // Handle password: try dedicated endpoints first, then include in main PUT
         // The last PUT /users/{id} with password field is included in case backend hashes on update
+        // Password change via dedicated endpoint only — PUT /users/{id} does NOT BCrypt the password
         if (password) {
-            let pwChanged = false;
             const pwAttempts = [
                 () => api('PUT',  `/users/${id}/password`,        { current_password: password, new_password: password }),
                 () => api('PUT',  `/users/${id}/password`,        { currentPassword:   password, newPassword:   password }),
                 () => api('POST', `/users/${id}/change-password`,  { current_password: password, new_password: password }),
                 () => api('POST', `/auth/change-password`,         { user_id: id, new_password: password }),
-                // Absolute last resort: full PUT with password in body
-                () => api('PUT',  `/users/${id}`, { ...payload, password }),
             ];
             for (const fn of pwAttempts) {
-                try { await fn(); pwChanged = true; break; } catch {}
+                try { await fn(); break; } catch {}
             }
-            if (!pwChanged) console.warn('Password change endpoints not available on this backend');
         }
 
         const fresh = await api('GET', '/users').catch(() => ({ data: allUsers }));
@@ -2565,7 +2581,7 @@ async function archiveProject(id) {
     const label      = isArchived ? 'Unarchive' : 'Archive';
     if (!confirm(`${label} project "${p.name}"?`)) return;
     try {
-        await api('PUT', `/projects/${id}`, { status: newStatus });
+        await api('PUT', `/projects/${id}`, { status: newStatus, name: p.name, requestorId: currentUser?.id, requestorName: currentUser?.name });
         const fresh = await api('GET', '/projects').catch(()=>({ data:allProjects }));
         allProjects = fresh.data || allProjects;
         renderAdminProjects();
@@ -3287,25 +3303,16 @@ async function changePassword(userId) {
     // BCrypt: password must be hashed server-side via a dedicated endpoint.
     // Try all PUT/POST variants (snake_case first since Jackson uses SNAKE_CASE strategy).
     const u = allUsers.find(x => x.id == userId) || currentUser || {};
+    // ONLY try dedicated password-change endpoints (PUT/POST-only, no PATCH).
+    // DO NOT include PUT /users/{id} as a fallback — it returns 200 but does NOT BCrypt the password,
+    // causing a false "success" where the old password still works.
     const attempts = [
-        () => api('PUT',  `/users/${userId}/password`,        { current_password: cur, new_password: nw }),
-        () => api('PUT',  `/users/${userId}/password`,        { currentPassword: cur, newPassword: nw }),
-        () => api('POST', `/users/${userId}/change-password`,  { current_password: cur, new_password: nw }),
-        () => api('POST', `/users/${userId}/change-password`,  { currentPassword: cur, newPassword: nw }),
-        () => api('POST', `/auth/change-password`,             { user_id: userId, current_password: cur, new_password: nw }),
-        // Full PUT with password (backend may BCrypt hash it on update)
-        () => api('PUT',  `/users/${userId}`, {
-            name: u.name, email: u.email, role: u.role,
-            username: u.username || u.email?.split('@')[0] || '',
-            department_name: u.departmentName || u.department_name || '',
-            departmentName:  u.departmentName || u.department_name || '',
-            join_date: u.joinDate || u.join_date || '',
-            joinDate:  u.joinDate || u.join_date || '',
-            hours_per_week:    u.hoursPerWeek  || u.hours_per_week  || 40,
-            performance_score: u.performanceScore || u.performance_score || 80,
-            skills: u.skills || [],
-            password: nw
-        }),
+        () => api('PUT',  `/users/${userId}/password`,       { current_password: cur, new_password: nw }),
+        () => api('PUT',  `/users/${userId}/password`,       { currentPassword: cur,  newPassword: nw }),
+        () => api('POST', `/users/${userId}/change-password`, { current_password: cur, new_password: nw }),
+        () => api('POST', `/users/${userId}/change-password`, { currentPassword: cur,  newPassword: nw }),
+        () => api('POST', `/auth/change-password`,            { user_id: userId, current_password: cur, new_password: nw }),
+        () => api('POST', `/auth/change-password`,            { userId,           currentPassword: cur, newPassword: nw }),
     ];
 
     let success = false, lastErr = '';
@@ -3318,7 +3325,7 @@ async function changePassword(userId) {
         ['pwCurrent','pwNew','pwConfirm',
          `pwCurrent_${userId}`,`pwNew_${userId}`,`pwConfirm_${userId}`
         ].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
-        showToast('Password updated — log in again with your new password 🔒');
+        showToast('Password update request sent. If it took effect, log in again with your new password 🔒');
     } else {
         showToast(`Password update failed: ${lastErr}`, 'error');
     }
@@ -3565,6 +3572,7 @@ async function loadEmployeesFromDB() {
 // ============================================================
 
 let _msgCurrentThread = null; // { partnerId, partnerName }
+let _sentMessages = []; // local cache of messages sent in this session
 
 function _getAllowedRecipients() {
     const me = currentUser;
@@ -3590,53 +3598,47 @@ async function openMessaging() {
 window.openMessaging = openMessaging;
 
 async function loadConversations() {
-    const body = document.getElementById('msgConvListBody');
-    if (!body) return;
-    body.innerHTML = '<div style="padding:1rem;color:var(--text-secondary);font-size:0.8rem">Loading…</div>';
+    const bodyEl = document.getElementById('msgConvListBody');
+    if (!bodyEl) return;
+    bodyEl.innerHTML = '<div style="padding:1rem;color:var(--text-secondary);font-size:0.8rem">Loading…</div>';
 
-    // Ensure allUsers is loaded so we can resolve names
     if (!allUsers.length) {
         try { const r = await api('GET','/users'); allUsers = r.data || []; } catch {}
     }
-
-    const resolveUser = (id) => allUsers.find(u => u.id == id);
+    const myId = parseInt(currentUser.id);
+    const resolveUser = id => allUsers.find(u => parseInt(u.id) === parseInt(id));
 
     try {
-        // Try multiple endpoints; pick first that returns data
-        let msgs = [];
-        const endpoints = [
-            `/messages?user_id=${currentUser.id}`,
-            `/messages?userId=${currentUser.id}`,
-            `/messages/user/${currentUser.id}`,
-            `/messages/inbox/${currentUser.id}`,
-            `/messages`,
-        ];
-        for (const url of endpoints) {
-            try {
-                const r = await api('GET', url);
-                const d = r?.data || [];
-                if (d.length) { msgs = d; break; }
-            } catch {}
-        }
-        // Filter to messages involving current user
-        msgs = msgs.filter(m => {
-            const fid = m.from_id ?? m.fromId;
-            const tid = m.to_id   ?? m.toId;
-            return fid == currentUser.id || tid == currentUser.id;
+        // GET /messages?userId=X returns ONLY received messages (WHERE to_id=X)
+        let received = [];
+        try {
+            const r = await api('GET', `/messages?userId=${myId}`);
+            received = r?.data || [];
+        } catch {}
+
+        // Merge with locally cached sent messages from this session
+        const allMsgs = [...received, ..._sentMessages];
+        // Deduplicate by id (sent messages that are also returned by server)
+        const seen = new Set();
+        const msgs = allMsgs.filter(m => {
+            const key = m.id || `${m.fromId||m.from_id}-${m.toId||m.to_id}-${m.created_at||Date.now()}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
         });
 
-        // Group into conversations by partner, resolving name from allUsers
         const convMap = {};
         msgs.forEach(m => {
-            const fid = m.from_id ?? m.fromId;
-            const tid = m.to_id   ?? m.toId;
-            const partnerId = (fid == currentUser.id) ? tid : fid;
+            const fid = parseInt(m.from_id ?? m.fromId ?? 0);
+            const tid = parseInt(m.to_id   ?? m.toId   ?? 0);
+            const partnerId = (fid === myId) ? tid : fid;
             if (!partnerId) return;
-            const partnerUser = resolveUser(partnerId);
-            const partnerName = partnerUser?.name || `User #${partnerId}`;
+            const pu = resolveUser(partnerId);
+            const partnerName = pu?.name || `User #${partnerId}`;
             if (!convMap[partnerId]) convMap[partnerId] = { partnerId, partnerName, msgs: [], unread: 0 };
             convMap[partnerId].msgs.push(m);
-            if (!m.is_read && tid == currentUser.id) convMap[partnerId].unread++;
+            // Only count as unread if sent TO me and not read
+            if (!m.is_read && !m.isRead && tid === myId) convMap[partnerId].unread++;
         });
 
         const convs = Object.values(convMap).sort((a, b) => {
@@ -3652,11 +3654,11 @@ async function loadConversations() {
         });
 
         if (!convs.length) {
-            body.innerHTML = '<div style="padding:1rem;color:var(--text-secondary);font-size:0.8rem;text-align:center">No messages yet.<br>Compose one to get started!</div>';
+            bodyEl.innerHTML = '<div style="padding:1rem;color:var(--text-secondary);font-size:0.8rem;text-align:center">No messages yet.<br>Compose one to get started!</div>';
             return;
         }
 
-        body.innerHTML = convs.map(c => {
+        bodyEl.innerHTML = convs.map(c => {
             const last = c.msgs[c.msgs.length - 1];
             const preview = (last?.body || '').substring(0, 45) + ((last?.body||'').length > 45 ? '…' : '');
             const isActive = _msgCurrentThread?.partnerId == c.partnerId;
@@ -3670,20 +3672,20 @@ async function loadConversations() {
             </div>`;
         }).join('');
     } catch(e) {
-        body.innerHTML = `<div style="padding:1rem;color:var(--text-secondary);font-size:0.8rem">Could not load: ${e.message}</div>`;
+        bodyEl.innerHTML = `<div style="padding:1rem;color:var(--text-secondary);font-size:0.8rem">Could not load: ${e.message}</div>`;
     }
 }
 window.loadConversations = loadConversations;
 
 async function openThread(partnerId, partnerName) {
-    _msgCurrentThread = { partnerId, partnerName };
+    _msgCurrentThread = { partnerId: parseInt(partnerId), partnerName };
     const threadArea = document.getElementById('msgThreadArea');
     const replyBar   = document.getElementById('msgReplyBar');
     const subtitle   = document.getElementById('msgModalSubtitle');
     if (!threadArea) return;
 
-    // Always resolve the real name from allUsers
-    const partnerUser = allUsers.find(u => u.id == partnerId);
+    // Resolve real partner name from allUsers
+    const partnerUser = allUsers.find(u => parseInt(u.id) === parseInt(partnerId));
     if (partnerUser?.name) {
         partnerName = partnerUser.name;
         _msgCurrentThread.partnerName = partnerName;
@@ -3692,41 +3694,39 @@ async function openThread(partnerId, partnerName) {
     threadArea.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-secondary)">Loading…</div>';
     if (replyBar) replyBar.style.display = 'flex';
 
-    // Highlight active conv item
     document.querySelectorAll('.msg-conv-item').forEach(el => {
-        el.classList.toggle('active', el.dataset.partnerId == partnerId);
+        el.classList.toggle('active', parseInt(el.dataset.partnerId) === parseInt(partnerId));
     });
 
     try {
-        // Try fetching thread directly, fall back to full inbox filter
-        // Fetch ALL messages for current user — the directional query may miss sent messages
-        // Try multiple endpoint patterns; filter locally for accuracy
-        let fetchedMsgs = [];
-        const fetchAttempts = [
-            `/messages?user_id=${currentUser.id}`,
-            `/messages?userId=${currentUser.id}`,
-            `/messages/user/${currentUser.id}`,
-            `/messages/inbox/${currentUser.id}`,
-            `/messages`,
-        ];
-        for (const url of fetchAttempts) {
-            try {
-                const r = await api('GET', url);
-                const d = r?.data || [];
-                if (d.length) { fetchedMsgs = d; break; }
-            } catch {}
-        }
+        const myId  = parseInt(currentUser.id);
+        const pid   = parseInt(partnerId);
 
-        let all = fetchedMsgs.filter(m => {
-            const fid = m.from_id ?? m.fromId;
-            const tid = m.to_id   ?? m.toId;
-            return (fid == currentUser.id && tid == partnerId) ||
-                   (fid == partnerId      && tid == currentUser.id);
-        }).sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
+        // Fetch received messages for current user
+        let received = [];
+        try {
+            const r = await api('GET', `/messages?userId=${myId}`);
+            received = r?.data || [];
+        } catch {}
+
+        // Merge with sent message cache
+        const allMsgs = [...received, ..._sentMessages];
+        const seen = new Set();
+        const all = allMsgs
+            .filter(m => {
+                const key = m.id || `${m.fromId||m.from_id}-${m.toId||m.to_id}-${m.body}`;
+                if (seen.has(key)) return false; seen.add(key); return true;
+            })
+            .filter(m => {
+                const fid = parseInt(m.from_id ?? m.fromId ?? 0);
+                const tid = parseInt(m.to_id   ?? m.toId   ?? 0);
+                return (fid === myId && tid === pid) || (fid === pid && tid === myId);
+            })
+            .sort((a, b) => new Date(a.created_at || a._localTime || 0) - new Date(b.created_at || b._localTime || 0));
 
         // Mark received messages as read
-        all.filter(m => !(m.is_read) && (m.to_id ?? m.toId) == currentUser.id)
-           .forEach(m => api('PUT', `/messages/${m.id}/read`, { is_read: 1 }).catch(() => {}));
+        all.filter(m => !(m.is_read || m.isRead) && parseInt(m.to_id ?? m.toId ?? 0) === myId)
+           .forEach(m => { if (m.id) api('PUT', `/messages/${m.id}/read`, {}).catch(() => {}); });
 
         if (!all.length) {
             threadArea.innerHTML = `<div style="text-align:center;padding:3rem;color:var(--text-secondary)">
@@ -3734,15 +3734,16 @@ async function openThread(partnerId, partnerName) {
                 <p>No messages yet. Send the first one!</p></div>`;
         } else {
             threadArea.innerHTML = all.map(m => {
-                const isMine = parseInt(m.from_id ?? m.fromId) === parseInt(currentUser.id);
-                const senderName = isMine ? 'You' : partnerName;
-                const time = m.created_at ? new Date(m.created_at).toLocaleString() : '';
-                return `<div style="display:flex;flex-direction:column;align-items:${isMine ? 'flex-end' : 'flex-start'};margin-bottom:1rem">
-                    <div style="max-width:75%;background:${isMine ? 'var(--primary)' : 'var(--bg-secondary)'};color:${isMine ? '#fff' : 'var(--text-primary)'};padding:0.65rem 0.9rem;border-radius:${isMine ? '12px 12px 2px 12px' : '12px 12px 12px 2px'};font-size:0.875rem;line-height:1.4">
-                        ${m.subject && m.subject !== 'Re: message' ? `<div style="font-weight:600;margin-bottom:0.25rem;font-size:0.8rem;opacity:0.85">${m.subject}</div>` : ''}
+                const fid    = parseInt(m.from_id ?? m.fromId ?? 0);
+                const isMine = fid === myId;
+                const sender = isMine ? 'You' : partnerName;
+                const time   = m.created_at ? new Date(m.created_at).toLocaleString() : 'Just now';
+                return `<div style="display:flex;flex-direction:column;align-items:${isMine?'flex-end':'flex-start'};margin-bottom:1rem">
+                    <div style="max-width:75%;background:${isMine?'var(--primary)':'var(--bg-secondary)'};color:${isMine?'#fff':'var(--text-primary)'};padding:0.65rem 0.9rem;border-radius:${isMine?'12px 12px 2px 12px':'12px 12px 12px 2px'};font-size:0.875rem;line-height:1.4">
+                        ${m.subject && m.subject !== 'Message' ? `<div style="font-weight:600;margin-bottom:0.25rem;font-size:0.8rem;opacity:0.85">${m.subject}</div>` : ''}
                         ${m.body || ''}
                     </div>
-                    <div style="font-size:0.7rem;color:var(--text-secondary);margin-top:0.2rem">${senderName} · ${time}</div>
+                    <div style="font-size:0.7rem;color:var(--text-secondary);margin-top:0.2rem">${sender} · ${time}</div>
                 </div>`;
             }).join('');
             threadArea.scrollTop = threadArea.scrollHeight;
@@ -3756,19 +3757,8 @@ async function openThread(partnerId, partnerName) {
 window.openThread = openThread;
 
 async function _postMessage(fromId, toId, subject, body) {
-    const payloads = [
-        { from_id: fromId, to_id: toId, subject, body },
-        { fromId,           toId,        subject, body },
-        { from_id: fromId, to_id: toId, body },           // no subject
-        { fromId,           toId,        body },            // no subject camelCase
-        { sender_id: fromId, receiver_id: toId, body },
-    ];
-    for (const payload of payloads) {
-        try { return await api('POST', '/messages', payload); } catch(e) {
-            if (!e.message.includes('4') && !e.message.includes('5')) throw e; // non-4xx/5xx = real error
-        }
-    }
-    throw new Error('Could not send message — no working /messages endpoint');
+    // Controller reads Map<String,Object> with literal keys "fromId" and "toId" (camelCase)
+    return await api('POST', '/messages', { fromId, toId, subject: subject || 'Message', body });
 }
 
 async function sendMsgReply() {
@@ -3776,9 +3766,16 @@ async function sendMsgReply() {
     const text = document.getElementById('msgReplyText')?.value?.trim();
     if (!text) { showToast('Write a message first ⚠️', 'error'); return; }
     try {
-        await _postMessage(currentUser.id, _msgCurrentThread.partnerId, 'Re: message', text);
+        const saved = await _postMessage(currentUser.id, _msgCurrentThread.partnerId, 'Message', text);
         const el = document.getElementById('msgReplyText');
         if (el) el.value = '';
+        // Cache the sent message locally so it appears in the thread immediately
+        const sentMsg = saved?.data || {
+            id: Date.now(), fromId: currentUser.id, toId: _msgCurrentThread.partnerId,
+            from_id: currentUser.id, to_id: _msgCurrentThread.partnerId,
+            body: text, subject: 'Message', is_read: true, _localTime: new Date().toISOString()
+        };
+        _sentMessages.push(sentMsg);
         showToast('Message sent ✓');
         await openThread(_msgCurrentThread.partnerId, _msgCurrentThread.partnerName);
     } catch(e) { showToast(`Send failed: ${e.message}`, 'error'); }
@@ -3832,7 +3829,14 @@ async function sendComposedMessage() {
     if (!body)  { showToast('Write a message first ⚠️', 'error'); return; }
     if (!toId)  { showToast('Select a recipient ⚠️', 'error'); return; }
     try {
-        await _postMessage(currentUser.id, toId, subj, body);
+        const savedMsg = await _postMessage(currentUser.id, toId, subj, body);
+        // Cache locally so it shows up immediately in the thread
+        const sentMsg = savedMsg?.data || {
+            id: Date.now(), fromId: currentUser.id, toId,
+            from_id: currentUser.id, to_id: toId,
+            body, subject: subj, is_read: true, _localTime: new Date().toISOString()
+        };
+        _sentMessages.push(sentMsg);
         closeModal('composeModal');
         const partner = allUsers.find(u => u.id === toId);
         showToast(`Message sent to ${partner?.name || 'recipient'} ✓`);
@@ -3884,14 +3888,16 @@ async function saveAdminProfile() {
     if (!name || !email) { showToast('Name and email are required', 'error'); return; }
     try {
         const u = currentUser;
+        // UserService.update reads camelCase Map keys
         await api('PUT', `/users/${u.id}`, {
-            name, email, role: u.role,
-            username:          u.username || u.email?.split('@')[0] || '',
-            department_name:   dept,
-            join_date:         u.joinDate || u.join_date || '',
-            hours_per_week:    u.hoursPerWeek || u.hours_per_week || 40,
-            performance_score: u.performanceScore || u.performance_score || 80,
-            skills
+            name, email,
+            role:           u.role,
+            departmentName: dept,
+            workload:       u.workload || 0,
+            hoursPerWeek:   u.hoursPerWeek || u.hours_per_week || 40,
+            performanceScore: u.performanceScore || u.performance_score || 80,
+            requestorId:    u.id,
+            requestorName:  u.name
         });
         currentUser.name  = name;
         currentUser.email = email;
