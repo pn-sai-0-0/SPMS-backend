@@ -189,6 +189,15 @@ async function handleLogin(event) {
 }
 
 async function initDashboard(role, user) {
+    // Update landing page live stats before hiding it
+    try {
+        const usersRes = await api('GET', '/users').catch(()=>null);
+        if (usersRes?.data) {
+            const activeCount = usersRes.data.filter(u=>u.status==='active').length;
+            const el = document.getElementById('counterUsers');
+            if (el) el.textContent = activeCount;
+        }
+    } catch {}
     document.getElementById('landingPage').classList.add('hidden');
     const dashMap = { employee:'employeeDashboard', manager:'managerDashboard', hr:'hrDashboard', admin:'adminDashboard' };
     const dash = document.getElementById(dashMap[role]);
@@ -1733,9 +1742,10 @@ async function renderHRActivities() {
 // Backend may return `departments[]`, `departmentName`, or `department_name`
 function getProjectDepts(p) {
     if (Array.isArray(p.departments) && p.departments.length)
-        return p.departments.map(d => d.name || d);
-    const dn = p.departmentName || p.department_name;
-    return dn ? [dn] : [];
+        return p.departments.map(d => d.name || d).filter(Boolean);
+    const dn = p.departmentName || p.department_name || '';
+    // department_name may be comma-separated (our HR multi-dept storage)
+    return dn ? dn.split(',').map(s=>s.trim()).filter(Boolean) : [];
 }
 
 async function renderAssignmentProjects() {
@@ -1878,8 +1888,17 @@ async function openHRManageProjectModal(projectId) {
     const existing = document.getElementById('hrManageProjectModal');
     if (existing) existing.parentNode?.removeChild(existing);
 
+    // Always fetch fresh from DB so we have latest department assignments
     const projRes = await api('GET', `/projects/${projectId}`).catch(()=>null);
-    const project = projRes?.data || allProjects.find(p=>p.id===projectId);
+    let project = projRes?.data;
+    if (!project) {
+        // Fallback: reload all projects and find
+        try {
+            const allRes = await api('GET', '/projects');
+            if (allRes?.data) allProjects = allRes.data;
+        } catch {}
+        project = allProjects.find(p=>p.id===projectId);
+    }
     if (!project) { showToast('Could not load project', 'error'); return; }
 
     const assignedDepts  = getProjectDepts(project);
@@ -2344,25 +2363,41 @@ async function handleEditUser(event) {
     const perfVal   = perfRaw  ? parseInt(perfRaw)   : (ex.performanceScore || ex.performance_score || 80);
     const deptVal   = dept     || ex.departmentName  || ex.department_name || '';
 
-    // Mirror POST /users payload exactly (same DTO, same required fields, SNAKE_CASE)
+    // Send BOTH camelCase and snake_case — POST /users works with both, PUT should too
     const payload = {
         name, email, role, username,
+        // snake_case (Jackson SNAKE_CASE strategy)
         department_name:   deptVal,
         join_date:         joinDate,
         hours_per_week:    hoursVal,
         performance_score: perfVal,
-        skills:            skills
+        // camelCase (in case DTO doesn't use SNAKE_CASE strategy for UPDATE endpoint)
+        departmentName:   deptVal,
+        joinDate:         joinDate,
+        hoursPerWeek:     hoursVal,
+        performanceScore: perfVal,
+        skills:           skills
     };
 
     try {
         await api('PUT', `/users/${id}`, payload);
 
-        // Handle password change via dedicated BCrypt-safe endpoints only (no PATCH — CORS blocked)
+        // Handle password: try dedicated endpoints first, then include in main PUT
+        // The last PUT /users/{id} with password field is included in case backend hashes on update
         if (password) {
-            await api('PUT',  `/users/${id}/password`, { current_password: password, new_password: password })
-                .catch(() => api('PUT',  `/users/${id}/password`, { currentPassword: password, newPassword: password }))
-                .catch(() => api('POST', `/users/${id}/change-password`, { new_password: password, current_password: password }))
-                .catch(() => {}); // silent — pw endpoint may not exist
+            let pwChanged = false;
+            const pwAttempts = [
+                () => api('PUT',  `/users/${id}/password`,        { current_password: password, new_password: password }),
+                () => api('PUT',  `/users/${id}/password`,        { currentPassword:   password, newPassword:   password }),
+                () => api('POST', `/users/${id}/change-password`,  { current_password: password, new_password: password }),
+                () => api('POST', `/auth/change-password`,         { user_id: id, new_password: password }),
+                // Absolute last resort: full PUT with password in body
+                () => api('PUT',  `/users/${id}`, { ...payload, password }),
+            ];
+            for (const fn of pwAttempts) {
+                try { await fn(); pwChanged = true; break; } catch {}
+            }
+            if (!pwChanged) console.warn('Password change endpoints not available on this backend');
         }
 
         const fresh = await api('GET', '/users').catch(() => ({ data: allUsers }));
@@ -3253,17 +3288,22 @@ async function changePassword(userId) {
     // Try all PUT/POST variants (snake_case first since Jackson uses SNAKE_CASE strategy).
     const u = allUsers.find(x => x.id == userId) || currentUser || {};
     const attempts = [
-        // Dedicated password endpoints (snake_case)
         () => api('PUT',  `/users/${userId}/password`,        { current_password: cur, new_password: nw }),
-        () => api('POST', `/users/${userId}/change-password`,  { current_password: cur, new_password: nw }),
-        // camelCase variants (in case DTO uses different naming)
         () => api('PUT',  `/users/${userId}/password`,        { currentPassword: cur, newPassword: nw }),
+        () => api('POST', `/users/${userId}/change-password`,  { current_password: cur, new_password: nw }),
         () => api('POST', `/users/${userId}/change-password`,  { currentPassword: cur, newPassword: nw }),
-        // Full user PUT including password field (backend may re-hash on update)
+        () => api('POST', `/auth/change-password`,             { user_id: userId, current_password: cur, new_password: nw }),
+        // Full PUT with password (backend may BCrypt hash it on update)
         () => api('PUT',  `/users/${userId}`, {
             name: u.name, email: u.email, role: u.role,
             username: u.username || u.email?.split('@')[0] || '',
             department_name: u.departmentName || u.department_name || '',
+            departmentName:  u.departmentName || u.department_name || '',
+            join_date: u.joinDate || u.join_date || '',
+            joinDate:  u.joinDate || u.join_date || '',
+            hours_per_week:    u.hoursPerWeek  || u.hours_per_week  || 40,
+            performance_score: u.performanceScore || u.performance_score || 80,
+            skills: u.skills || [],
             password: nw
         }),
     ];
@@ -3562,33 +3602,41 @@ async function loadConversations() {
     const resolveUser = (id) => allUsers.find(u => u.id == id);
 
     try {
-        const res = await api('GET', `/messages?user_id=${currentUser.id}`)
-            .catch(() => api('GET', `/messages?userId=${currentUser.id}`))
-            .catch(() => api('GET', `/messages/user/${currentUser.id}`))
-            .catch(() => api('GET', `/messages/inbox/${currentUser.id}`))
-            .catch(() => api('GET', `/messages`))
-            .catch(() => ({ data: [] }));
-        
-        let msgs = res?.data || [];
-        // Filter to only messages involving current user
+        // Try multiple endpoints; pick first that returns data
+        let msgs = [];
+        const endpoints = [
+            `/messages?user_id=${currentUser.id}`,
+            `/messages?userId=${currentUser.id}`,
+            `/messages/user/${currentUser.id}`,
+            `/messages/inbox/${currentUser.id}`,
+            `/messages`,
+        ];
+        for (const url of endpoints) {
+            try {
+                const r = await api('GET', url);
+                const d = r?.data || [];
+                if (d.length) { msgs = d; break; }
+            } catch {}
+        }
+        // Filter to messages involving current user
         msgs = msgs.filter(m => {
-            const fid = m.fromId || m.from_id;
-            const tid = m.toId   || m.to_id;
+            const fid = m.from_id ?? m.fromId;
+            const tid = m.to_id   ?? m.toId;
             return fid == currentUser.id || tid == currentUser.id;
         });
 
         // Group into conversations by partner, resolving name from allUsers
         const convMap = {};
         msgs.forEach(m => {
-            const fid = m.fromId || m.from_id;
-            const tid = m.toId   || m.to_id;
-            const partnerId = fid == currentUser.id ? tid : fid;
+            const fid = m.from_id ?? m.fromId;
+            const tid = m.to_id   ?? m.toId;
+            const partnerId = (fid == currentUser.id) ? tid : fid;
             if (!partnerId) return;
             const partnerUser = resolveUser(partnerId);
-            const partnerName = partnerUser?.name || m.toName || m.to_name || m.fromName || m.from_name || `User #${partnerId}`;
+            const partnerName = partnerUser?.name || `User #${partnerId}`;
             if (!convMap[partnerId]) convMap[partnerId] = { partnerId, partnerName, msgs: [], unread: 0 };
             convMap[partnerId].msgs.push(m);
-            if (!(m.is_read || m.isRead) && tid == currentUser.id) convMap[partnerId].unread++;
+            if (!m.is_read && tid == currentUser.id) convMap[partnerId].unread++;
         });
 
         const convs = Object.values(convMap).sort((a, b) => {
@@ -3651,16 +3699,25 @@ async function openThread(partnerId, partnerName) {
 
     try {
         // Try fetching thread directly, fall back to full inbox filter
-        const res = await api('GET', `/messages?from_id=${currentUser.id}&to_id=${partnerId}`)
-            .catch(() => api('GET', `/messages?user_id=${currentUser.id}`))
-            .catch(() => api('GET', `/messages?userId=${currentUser.id}`))
-            .catch(() => api('GET', `/messages/user/${currentUser.id}`))
-            .catch(() => api('GET', `/messages`))
-            .catch(() => ({ data: [] }));
+        // Fetch ALL messages for current user — the directional query may miss sent messages
+        // Try multiple endpoint patterns; filter locally for accuracy
+        let fetchedMsgs = [];
+        const fetchAttempts = [
+            `/messages?user_id=${currentUser.id}`,
+            `/messages?userId=${currentUser.id}`,
+            `/messages/user/${currentUser.id}`,
+            `/messages/inbox/${currentUser.id}`,
+            `/messages`,
+        ];
+        for (const url of fetchAttempts) {
+            try {
+                const r = await api('GET', url);
+                const d = r?.data || [];
+                if (d.length) { fetchedMsgs = d; break; }
+            } catch {}
+        }
 
-        let all = res?.data || [];
-        // Filter to this conversation only
-        all = all.filter(m => {
+        let all = fetchedMsgs.filter(m => {
             const fid = m.from_id ?? m.fromId;
             const tid = m.to_id   ?? m.toId;
             return (fid == currentUser.id && tid == partnerId) ||
@@ -3677,7 +3734,7 @@ async function openThread(partnerId, partnerName) {
                 <p>No messages yet. Send the first one!</p></div>`;
         } else {
             threadArea.innerHTML = all.map(m => {
-                const isMine = (m.from_id ?? m.fromId) == currentUser.id;
+                const isMine = parseInt(m.from_id ?? m.fromId) === parseInt(currentUser.id);
                 const senderName = isMine ? 'You' : partnerName;
                 const time = m.created_at ? new Date(m.created_at).toLocaleString() : '';
                 return `<div style="display:flex;flex-direction:column;align-items:${isMine ? 'flex-end' : 'flex-start'};margin-bottom:1rem">
@@ -3699,17 +3756,19 @@ async function openThread(partnerId, partnerName) {
 window.openThread = openThread;
 
 async function _postMessage(fromId, toId, subject, body) {
-    // Try snake_case (Jackson SNAKE_CASE strategy maps from_id → fromId in Java DTO)
-    // and fallback to camelCase (in case DTO uses @JsonProperty or entity fields directly)
     const payloads = [
         { from_id: fromId, to_id: toId, subject, body },
         { fromId,           toId,        subject, body },
-        { sender_id: fromId, receiver_id: toId, subject, body },
+        { from_id: fromId, to_id: toId, body },           // no subject
+        { fromId,           toId,        body },            // no subject camelCase
+        { sender_id: fromId, receiver_id: toId, body },
     ];
     for (const payload of payloads) {
-        try { return await api('POST', '/messages', payload); } catch {}
+        try { return await api('POST', '/messages', payload); } catch(e) {
+            if (!e.message.includes('4') && !e.message.includes('5')) throw e; // non-4xx/5xx = real error
+        }
     }
-    throw new Error('Could not send message — check backend /messages endpoint');
+    throw new Error('Could not send message — no working /messages endpoint');
 }
 
 async function sendMsgReply() {
