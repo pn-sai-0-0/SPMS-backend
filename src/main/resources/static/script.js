@@ -664,15 +664,22 @@ async function openProjectDetail(id, role) {
                     <h4>💬 Comments & Instructions</h4>
                     <div id="commentsList${p.id}">
                         ${comments.map(c => {
-                            const isOwn = currentUser && (c.authorId === currentUser.id || c.author_id === currentUser.id || c.authorName === currentUser.name || c.author_name === currentUser.name);
-                            // HR can delete any comment; manager can delete any comment; employee can delete own
-                            const canDelComment = role === 'hr' || role === 'manager' || (role === 'employee' && isOwn);
+                            const isOwn = currentUser && (c.authorId == currentUser.id || c.author_id == currentUser.id || c.authorName === currentUser.name || c.author_name === currentUser.name);
+                            // Admin can delete anyone's comment; everyone else only their own
+                            const canDelComment = role === 'admin' || isOwn;
                             return `<div class="comment-item" id="cmt-${c.id}">
                                 <div class="comment-author">${c.authorName||c.author_name||'User'} <span class="comment-role">(${c.authorRole||c.author_role||''})</span></div>
                                 <div class="comment-text">${c.commentText||c.comment_text}</div>
                                 <div style="display:flex;justify-content:space-between;align-items:center;margin-top:0.35rem">
-                                    <div class="comment-time">${formatTime(c.createdAt||c.created_at)}</div>
+                                    <div style="display:flex;gap:0.4rem;align-items:center">
+                                        <div class="comment-time">${formatTime(c.createdAt||c.created_at)}</div>
+                                        <button class="btn btn-sm btn-secondary" style="padding:0.15rem 0.45rem;font-size:0.7rem" onclick="toggleReplyBox(${c.id})">↩ Reply</button>
+                                    </div>
                                     ${canDelComment ? `<button class="btn btn-sm btn-danger" style="padding:0.2rem 0.5rem;font-size:0.72rem;line-height:1" onclick="deleteProjectComment(${c.id},${p.id},'${role}')">🗑️ Delete</button>` : ''}
+                                </div>
+                                <div id="reply-box-${c.id}" style="display:none;flex-direction:column;gap:0.4rem;margin-top:0.5rem;padding:0.5rem;background:var(--bg-secondary);border-radius:6px">
+                                    <textarea id="reply-input-${c.id}" rows="2" style="resize:none;background:var(--bg-card,var(--bg-primary));border:1px solid var(--border);border-radius:6px;padding:0.4rem;color:var(--text-primary);font-size:0.8rem" placeholder="Write your reply…"></textarea>
+                                    <button class="btn btn-sm btn-primary" style="align-self:flex-end" onclick="replyToComment(${c.id},${p.id},'${role}')">Post Reply</button>
                                 </div>
                             </div>`;
                         }).join('') || '<p style="color:var(--text-secondary);font-size:0.85rem">No comments yet</p>'}
@@ -883,16 +890,25 @@ async function addProjectComment(projectId, role) {
 
 // ── Delete a comment (manager/HR can delete their own comments) + log action ──
 async function deleteProjectComment(commentId, projectId, role) {
-    if (!confirm('Delete this comment? This action cannot be undone.')) return;
+    if (!confirm('Delete this comment? This cannot be undone.')) return;
     const row = document.getElementById(`cmt-${commentId}`);
     if (row) row.style.opacity = '0.4';
     try {
-        // Try /projects/{projectId}/comments/{commentId} first, fall back to /comments/{commentId}
-        await api('DELETE', `/projects/${projectId}/comments/${commentId}`)
-            .catch(()=> api('DELETE', `/comments/${commentId}`, { deleterId: currentUser?.id }));
+        // Try all known Spring Boot comment delete patterns
+        const deleteAttempts = [
+            () => api('DELETE', `/projects/${projectId}/comments/${commentId}`),
+            () => api('DELETE', `/comments/${commentId}`),
+            () => api('DELETE', `/project-comments/${commentId}`),
+            () => api('DELETE', `/comments/${commentId}?projectId=${projectId}`),
+        ];
+        let deleted = false;
+        for (const attempt of deleteAttempts) {
+            try { await attempt(); deleted = true; break; } catch {}
+        }
+        if (!deleted) throw new Error('No working delete endpoint found');
         showToast('Comment deleted ✓');
         await openProjectDetail(projectId, role);
-    } catch (e) {
+    } catch(e) {
         if (row) row.style.opacity = '1';
         showToast(`Failed to delete comment: ${e.message}`, 'error');
     }
@@ -2309,23 +2325,45 @@ async function handleEditUser(event) {
     const email    = document.getElementById('editUserEmail')?.value?.trim();
     const role     = document.getElementById('editUserRole')?.value;
     const dept     = document.getElementById('editUserDept')?.value?.trim();
-    const perfRaw  = document.getElementById('editUserPerformance')?.value;
-    const hoursRaw = document.getElementById('editUserHours')?.value;
+    const perfRaw  = document.getElementById('editUserPerformance')?.value?.trim();
+    const hoursRaw = document.getElementById('editUserHours')?.value?.trim();
     const password = document.getElementById('editUserPassword')?.value || '';
     const skillsRaw= document.getElementById('editUserSkills')?.value?.trim() || '';
     const skills   = skillsRaw ? skillsRaw.split(',').map(s=>s.trim()).filter(Boolean) : null;
-    // Send only core fields the backend accepts (camelCase + snake_case both)
-    const payload = { name, email, role, department_name: dept, departmentName: dept };
-    if (perfRaw  !== '') { payload.performance_score  = parseInt(perfRaw);  payload.performanceScore = parseInt(perfRaw); }
-    if (hoursRaw !== '') { payload.hours_per_week     = parseInt(hoursRaw); payload.hoursPerWeek     = parseInt(hoursRaw); }
-    if (skills !== null) { payload.skills = skills; } // send as array, not JSON string
+
+    // Minimal payload — only send fields the backend PUT /users/{id} accepts
+    const payload = { name, email, role, department_name: dept };
+    if (perfRaw)         payload.performance_score  = parseInt(perfRaw);
+    if (hoursRaw)        payload.hours_per_week      = parseInt(hoursRaw);
+    if (skills !== null) payload.skills              = skills;
+
+    let ok = false;
     try {
         await api('PUT', `/users/${id}`, payload);
+        ok = true;
+    } catch(e1) {
+        // Backend rejected — try with only absolutely core fields
+        try {
+            await api('PUT', `/users/${id}`, { name, email, role, department_name: dept });
+            ok = true;
+            // Try skills/perf separately via PATCH
+            if (skills !== null || perfRaw || hoursRaw) {
+                const patch = {};
+                if (skills !== null) patch.skills = skills;
+                if (perfRaw)  patch.performance_score = parseInt(perfRaw);
+                if (hoursRaw) patch.hours_per_week    = parseInt(hoursRaw);
+                await api('PATCH', `/users/${id}`, patch).catch(()=>{});
+            }
+        } catch(e2) {
+            showToast(`Update failed: ${e2.message}`, 'error'); return;
+        }
+    }
+
+    if (ok) {
         // Change password separately if provided
         if (password) {
-            await api('PUT', `/users/${id}/password`, { password }).catch(()=>
-                api('PATCH', `/users/${id}`, { password }).catch(()=>{})
-            );
+            await api('PUT', `/users/${id}/password`, { password, newPassword: password })
+                .catch(()=> api('PATCH', `/users/${id}`, { password }).catch(()=>{}));
         }
         const fresh = await api('GET', '/users').catch(()=>({ data:allUsers }));
         allUsers = fresh.data || allUsers;
@@ -2333,8 +2371,6 @@ async function handleEditUser(event) {
         renderUserManagement();
         renderAdminStats();
         showToast(`User ${name} updated ✓`);
-    } catch (e) {
-        showToast(`Update failed: ${e.message}`, 'error');
     }
 }
 
@@ -3199,16 +3235,25 @@ window.renderAdminProfile   = renderAdminProfile;
 //  PASSWORD CHANGE (available to all roles from profile)
 // ============================================================
 async function changePassword(userId) {
-    const cur  = document.getElementById('pwCurrent')?.value;
-    const nw   = document.getElementById('pwNew')?.value;
-    const conf = document.getElementById('pwConfirm')?.value;
-    if (!cur || !nw)      { showToast('Please fill in all fields ⚠️', 'error'); return; }
-    if (nw !== conf)      { showToast('New passwords do not match ⚠️', 'error'); return; }
-    if (nw.length < 6)    { showToast('Password must be at least 6 characters', 'error'); return; }
+    // Support both generic IDs (employee profile in HTML) and scoped IDs (dynamic profiles)
+    const getVal = id => {
+        const scoped = document.getElementById(`${id}_${userId}`);
+        return (scoped ? scoped.value : document.getElementById(id)?.value) || '';
+    };
+    const cur  = getVal('pwCurrent');
+    const nw   = getVal('pwNew');
+    const conf = getVal('pwConfirm');
+    if (!cur || !nw || !conf) { showToast('Please fill in all fields ⚠️', 'error'); return; }
+    if (nw !== conf)           { showToast('New passwords do not match ⚠️', 'error'); return; }
+    if (nw.length < 6)         { showToast('Password must be at least 6 characters', 'error'); return; }
     try {
+        // Try dedicated endpoint first, then fallback
         await api('PUT', `/users/${userId}/password`, { currentPassword: cur, password: nw, newPassword: nw })
-            .catch(()=> api('PUT', `/users/${userId}`, { password: nw }));
-        ['pwCurrent','pwNew','pwConfirm'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+            .catch(()=> api('PUT',   `/users/${userId}`, { password: nw })
+            .catch(()=> api('PATCH', `/users/${userId}`, { password: nw })));
+        ['pwCurrent','pwNew','pwConfirm',
+         `pwCurrent_${userId}`,`pwNew_${userId}`,`pwConfirm_${userId}`
+        ].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
         showToast('Password changed successfully 🔒');
     } catch(e) { showToast(`Failed: ${e.message}`, 'error'); }
 }
@@ -3218,9 +3263,9 @@ function _passwordCard(userId) {
     return `
     <div class="card card-modern" style="margin-top:0">
         <h3 class="card-title" style="margin-bottom:1rem">🔒 Change Password</h3>
-        <div class="form-group"><label>Current Password</label><input type="password" id="pwCurrent" class="form-control" placeholder="Enter current password"></div>
-        <div class="form-group"><label>New Password</label><input type="password" id="pwNew" class="form-control" placeholder="At least 6 characters"></div>
-        <div class="form-group"><label>Confirm New Password</label><input type="password" id="pwConfirm" class="form-control" placeholder="Repeat new password"></div>
+        <div class="form-group"><label>Current Password</label><input type="password" id="pwCurrent_${userId}" class="form-control" placeholder="Enter current password"></div>
+        <div class="form-group"><label>New Password</label><input type="password" id="pwNew_${userId}" class="form-control" placeholder="At least 6 characters"></div>
+        <div class="form-group"><label>Confirm New Password</label><input type="password" id="pwConfirm_${userId}" class="form-control" placeholder="Repeat new password"></div>
         <button class="btn btn-primary btn-glow" onclick="changePassword(${userId})">Update Password 🔒</button>
     </div>`;
 }
@@ -3482,21 +3527,39 @@ async function loadConversations() {
     const body = document.getElementById('msgConvListBody');
     if (!body) return;
     body.innerHTML = '<div style="padding:1rem;color:var(--text-secondary);font-size:0.8rem">Loading…</div>';
-    try {
-        // Fetch all messages where I am sender or receiver
-        const res = await api('GET', `/messages?userId=${currentUser.id}`).catch(() =>
-            api('GET', `/messages/inbox/${currentUser.id}`).catch(() => ({ data: [] }))
-        );
-        const msgs = res?.data || [];
 
-        // Group into conversations by partner
+    // Ensure allUsers is loaded so we can resolve names
+    if (!allUsers.length) {
+        try { const r = await api('GET','/users'); allUsers = r.data || []; } catch {}
+    }
+
+    const resolveUser = (id) => allUsers.find(u => u.id == id);
+
+    try {
+        const res = await api('GET', `/messages?userId=${currentUser.id}`)
+            .catch(() => api('GET', `/messages/user/${currentUser.id}`)
+            .catch(() => api('GET', `/messages`).catch(() => ({ data: [] }))));
+        
+        let msgs = res?.data || [];
+        // Filter to only messages involving current user
+        msgs = msgs.filter(m => {
+            const fid = m.fromId || m.from_id;
+            const tid = m.toId   || m.to_id;
+            return fid == currentUser.id || tid == currentUser.id;
+        });
+
+        // Group into conversations by partner, resolving name from allUsers
         const convMap = {};
         msgs.forEach(m => {
-            const partnerId   = (m.fromId || m.from_id) === currentUser.id ? (m.toId || m.to_id) : (m.fromId || m.from_id);
-            const partnerName = (m.fromId || m.from_id) === currentUser.id ? (m.toName || m.to_name || 'Unknown') : (m.fromName || m.from_name || 'Unknown');
+            const fid = m.fromId || m.from_id;
+            const tid = m.toId   || m.to_id;
+            const partnerId = fid == currentUser.id ? tid : fid;
+            if (!partnerId) return;
+            const partnerUser = resolveUser(partnerId);
+            const partnerName = partnerUser?.name || m.toName || m.to_name || m.fromName || m.from_name || `User #${partnerId}`;
             if (!convMap[partnerId]) convMap[partnerId] = { partnerId, partnerName, msgs: [], unread: 0 };
             convMap[partnerId].msgs.push(m);
-            if (!(m.is_read || m.isRead) && (m.toId || m.to_id) === currentUser.id) convMap[partnerId].unread++;
+            if (!(m.is_read || m.isRead) && tid == currentUser.id) convMap[partnerId].unread++;
         });
 
         const convs = Object.values(convMap).sort((a, b) => {
@@ -3505,7 +3568,6 @@ async function loadConversations() {
             return tb - ta;
         });
 
-        // Update badge count
         const totalUnread = convs.reduce((s, c) => s + c.unread, 0);
         ['empMsgBadge','mgrMsgBadge','hrMsgBadge','adminMsgBadge'].forEach(id => {
             const el = document.getElementById(id);
@@ -3520,8 +3582,9 @@ async function loadConversations() {
         body.innerHTML = convs.map(c => {
             const last = c.msgs[c.msgs.length - 1];
             const preview = (last?.body || '').substring(0, 45) + ((last?.body||'').length > 45 ? '…' : '');
-            const isActive = _msgCurrentThread?.partnerId === c.partnerId;
-            return `<div class="msg-conv-item${isActive ? ' active' : ''}" onclick="openThread(${c.partnerId},'${(c.partnerName||'').replace(/'/g,"\\'")}')">
+            const isActive = _msgCurrentThread?.partnerId == c.partnerId;
+            const safeName = (c.partnerName||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+            return `<div class="msg-conv-item${isActive ? ' active' : ''}" onclick="openThread(${c.partnerId},'${safeName}')">
                 <div style="display:flex;justify-content:space-between;align-items:center">
                     <div style="font-weight:${c.unread?700:500};font-size:0.875rem">${c.partnerName}</div>
                     ${c.unread ? `<span class="badge badge-primary" style="font-size:0.65rem;padding:0.1rem 0.4rem">${c.unread}</span>` : ''}
@@ -3530,7 +3593,7 @@ async function loadConversations() {
             </div>`;
         }).join('');
     } catch(e) {
-        body.innerHTML = `<div style="padding:1rem;color:var(--text-secondary);font-size:0.8rem">Could not load messages</div>`;
+        body.innerHTML = `<div style="padding:1rem;color:var(--text-secondary);font-size:0.8rem">Could not load: ${e.message}</div>`;
     }
 }
 window.loadConversations = loadConversations;
@@ -3557,15 +3620,26 @@ async function openThread(partnerId, partnerName) {
             api('GET', `/messages/inbox/${currentUser.id}`).catch(() => ({ data: [] }))
         );
         const all = res?.data || [];
+        // Resolve actual partner name from allUsers if not passed correctly
+        const partnerUser = allUsers.find(u => u.id == partnerId);
+        if (partnerUser && partnerUser.name && partnerName.startsWith('User #')) {
+            partnerName = partnerUser.name;
+            _msgCurrentThread.partnerName = partnerName;
+        } else if (partnerUser && partnerUser.name && partnerName === 'Unknown') {
+            partnerName = partnerUser.name;
+            _msgCurrentThread.partnerName = partnerName;
+        }
+        if (subtitle) subtitle.textContent = `Conversation with ${partnerName}`;
+
         const thread = all.filter(m => {
             const fid = m.fromId || m.from_id;
             const tid = m.toId   || m.to_id;
-            return (fid === currentUser.id && tid === partnerId) ||
-                   (fid === partnerId      && tid === currentUser.id);
+            return (fid == currentUser.id && tid == partnerId) ||
+                   (fid == partnerId      && tid == currentUser.id);
         }).sort((a, b) => new Date(a.created_at||0) - new Date(b.created_at||0));
 
         // Mark unread as read
-        const unread = thread.filter(m => !(m.is_read||m.isRead) && (m.toId||m.to_id) === currentUser.id);
+        const unread = thread.filter(m => !(m.is_read||m.isRead) && (m.toId||m.to_id) == currentUser.id);
         unread.forEach(m => api('PUT', `/messages/${m.id}/read`).catch(()=>{}));
 
         if (!thread.length) {
@@ -3611,19 +3685,44 @@ async function sendMsgReply() {
 }
 window.sendMsgReply = sendMsgReply;
 
-function openComposeMessage() {
+async function openComposeMessage() {
     const modal = document.getElementById('composeModal');
     if (!modal) return;
+    // Always reload users so recipients are fresh
+    if (!allUsers.length) {
+        try { const r = await api('GET','/users'); allUsers = r.data || []; } catch {}
+    }
     const sel = document.getElementById('composeTo');
+    const searchBox = document.getElementById('composeToSearch');
     if (sel) {
-        const recipients = _getAllowedRecipients();
-        sel.innerHTML = recipients.map(u =>
-            `<option value="${u.id}">${u.name} (${u.role})</option>`
-        ).join('');
-        if (!recipients.length) sel.innerHTML = '<option>No recipients available</option>';
+        _populateComposeRecipients('');
+    }
+    if (searchBox) {
+        searchBox.value = '';
+        searchBox.oninput = () => _populateComposeRecipients(searchBox.value);
     }
     modal.classList.add('active');
 }
+
+function _populateComposeRecipients(query) {
+    const sel = document.getElementById('composeTo');
+    if (!sel) return;
+    const q = (query||'').toLowerCase();
+    let recipients = _getAllowedRecipients();
+    if (q) recipients = recipients.filter(u =>
+        u.name.toLowerCase().includes(q) ||
+        (u.role||'').toLowerCase().includes(q) ||
+        (u.employeeId||u.employee_id||'').toLowerCase().includes(q)
+    );
+    if (!recipients.length) {
+        sel.innerHTML = '<option value="">No matching recipients</option>';
+    } else {
+        sel.innerHTML = recipients.map(u =>
+            `<option value="${u.id}">${u.name} — ${u.role} ${u.employeeId||u.employee_id||''}</option>`
+        ).join('');
+    }
+}
+window._populateComposeRecipients = _populateComposeRecipients;
 window.openComposeMessage = openComposeMessage;
 
 async function sendComposedMessage() {
@@ -3661,6 +3760,81 @@ async function sendMessage(userId) { openMessageModal(userId); }
 
 window.openMessageModal = openMessageModal;
 window.sendMessage      = sendMessage;
+
+// ============================================================
+//  ADMIN EDIT PROFILE (admin only)
+// ============================================================
+function openAdminEditProfileModal() {
+    const u = currentUser;
+    if (!u || u.role !== 'admin') return;
+    const sv = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+    sv('adminEditName',   u.name);
+    sv('adminEditEmail',  u.email);
+    sv('adminEditDept',   u.departmentName || u.department_name || '');
+    sv('adminEditSkills', parseSkills(u.skills).join(', '));
+    document.getElementById('adminEditProfileModal')?.classList.add('active');
+}
+window.openAdminEditProfileModal = openAdminEditProfileModal;
+
+async function saveAdminProfile() {
+    const name   = document.getElementById('adminEditName')?.value?.trim();
+    const email  = document.getElementById('adminEditEmail')?.value?.trim();
+    const dept   = document.getElementById('adminEditDept')?.value?.trim();
+    const skills = parseSkills(document.getElementById('adminEditSkills')?.value || '');
+    if (!name || !email) { showToast('Name and email are required', 'error'); return; }
+    try {
+        await api('PUT', `/users/${currentUser.id}`, {
+            name, email, department_name: dept, skills
+        });
+        currentUser.name  = name;
+        currentUser.email = email;
+        currentUser.departmentName = dept;
+        currentUser.skills = skills;
+        closeModal('adminEditProfileModal');
+        renderAdminProfile();
+        showToast('Profile updated ✓');
+    } catch(e) { showToast(`Failed: ${e.message}`, 'error'); }
+}
+window.saveAdminProfile = saveAdminProfile;
+
+// ============================================================
+//  COMMENT REPLY SYSTEM (inline replies under any comment)
+// ============================================================
+async function replyToComment(parentCommentId, projectId, role) {
+    const replyBox = document.getElementById(`reply-input-${parentCommentId}`);
+    const text = replyBox?.value?.trim();
+    if (!text) { showToast('Write a reply first ⚠️', 'error'); return; }
+    try {
+        await api('POST', `/projects/${projectId}/comments`, {
+            projectId,
+            authorId:   currentUser.id,
+            authorName: currentUser.name,
+            authorRole: currentUser.role,
+            commentText: `↩ Reply to comment: ${text}`,
+            parentId: parentCommentId
+        }).catch(()=> api('POST', '/comments', {
+            projectId,
+            authorId:   currentUser.id,
+            authorName: currentUser.name,
+            authorRole: currentUser.role,
+            commentText: `↩ Reply: ${text}`,
+            parentId: parentCommentId
+        }));
+        showToast('Reply posted ✓');
+        await openProjectDetail(projectId, role);
+    } catch(e) { showToast(`Reply failed: ${e.message}`, 'error'); }
+}
+window.replyToComment = replyToComment;
+
+function toggleReplyBox(commentId) {
+    const box = document.getElementById(`reply-box-${commentId}`);
+    if (!box) return;
+    box.style.display = box.style.display === 'none' ? 'flex' : 'none';
+    if (box.style.display === 'flex') {
+        box.querySelector('textarea')?.focus();
+    }
+}
+window.toggleReplyBox = toggleReplyBox;
 
 window.loadProjectsFromDB = loadProjectsFromDB;
 // HR assignment

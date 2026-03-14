@@ -931,9 +931,26 @@
             </form>
         </div>
         <div id="admin-profile" class="view-content hidden">
-            <div class="page-header"><div><h1>My Profile</h1><p>Your administrator account details and system access information</p></div></div>
+            <div class="page-header">
+                <div><h1>My Profile</h1><p>Your administrator account details and system access information</p></div>
+                <button class="btn btn-primary btn-glow" onclick="openAdminEditProfileModal()">✏️ Edit Profile</button>
+            </div>
             <div class="profile-body"></div>
         </div>
+
+<!-- Admin Edit Profile Modal -->
+<div id="adminEditProfileModal" class="modal">
+  <div class="modal-backdrop" onclick="closeModal('adminEditProfileModal')"></div>
+  <div class="modal-content modal-modern" style="max-width:480px">
+    <button class="modal-close" onclick="closeModal('adminEditProfileModal')">×</button>
+    <div class="modal-header-modern"><h2>✏️ Edit My Profile</h2><p>Update your administrator information</p></div>
+    <div class="form-group"><label>Full Name</label><input type="text" id="adminEditName" class="form-control"></div>
+    <div class="form-group"><label>Email</label><input type="email" id="adminEditEmail" class="form-control"></div>
+    <div class="form-group"><label>Department</label><input type="text" id="adminEditDept" class="form-control"></div>
+    <div class="form-group"><label>Skills (comma-separated)</label><input type="text" id="adminEditSkills" class="form-control" placeholder="e.g. Leadership, Strategy, SQL"></div>
+    <button class="btn btn-primary btn-block btn-glow" onclick="saveAdminProfile()">Save Changes ✓</button>
+  </div>
+</div>
     </main>
 </div>
 <!-- ==================== MODALS ==================== -->
@@ -1037,8 +1054,12 @@
 async function addNewDept() {
     const name = document.getElementById('newDeptName')?.value?.trim();
     if (!name) { showToast('Enter a department name ❌', 'error'); return; }
+    // Generate a unique code from the name (e.g. "Research & Dev" → "RD-001")
+    const code = name.replace(/[^a-zA-Z0-9]/g,' ').trim().split(/\s+/)
+        .map(w=>w[0]?.toUpperCase()||'').join('').substring(0,6)
+        + '-' + String(Date.now()).slice(-3);
     try {
-        await api('POST', '/departments', { name, requestorId: currentUser?.id, requestorName: currentUser?.name });
+        await api('POST', '/departments', { name, code, description: name });
         document.getElementById('newDeptName').value = '';
         // Refresh dept list from DB and repopulate all dropdowns
         const deptRes = await api('GET', '/departments').catch(()=>({ data: allDepartments }));
@@ -1128,7 +1149,8 @@ function addNewSkill() {
     <div class="modal-header-modern"><h2>✏️ New Message</h2><p>Send a message to a colleague</p></div>
     <div class="form-group">
       <label>To</label>
-      <select id="composeTo" class="form-control"></select>
+      <input type="text" id="composeToSearch" class="form-control" placeholder="Search by name, role or ID…" style="margin-bottom:0.4rem">
+      <select id="composeTo" class="form-control" size="4" style="border-radius:8px"></select>
     </div>
     <div class="form-group">
       <label>Subject</label>
