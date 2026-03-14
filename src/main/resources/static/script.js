@@ -30,8 +30,6 @@ async function api(method, endpoint, data = null) {
     let json;
     try { json = await res.json(); } catch { json = {}; }
     if (!res.ok) throw new Error(json.message || `Server error ${res.status}`);
-    // Controller returns HTTP 200 even for logic errors — check success flag
-    if (json && json.success === false && json.message) throw new Error(json.message);
     return json;
 }
 
@@ -169,23 +167,38 @@ async function handleLogin(event) {
     if (!username || !password || !role) { showToast('Please fill in all fields ❌', 'error'); return; }
     const btn = event.target.querySelector('button[type="submit"]');
     if (btn) { btn.textContent = 'Signing in…'; btn.disabled = true; }
+
+    // Show "waking up" message after 3 seconds if no response yet (Render free tier cold start)
+    let wakeupToastShown = false;
+    const wakeupTimer = setTimeout(() => {
+        wakeupToastShown = true;
+        showToast('Backend is waking up on Render… please wait ⏳', 'info');
+    }, 3000);
+
     try {
         const res = await api('POST', '/auth/login', { username, password, role });
-        if (res.success && res.data) {
+        clearTimeout(wakeupTimer);
+
+        // res.success=false means wrong credentials (HTTP 200 with error body)
+        if (!res.success) {
+            showToast(res.message || 'Invalid credentials — check username, password and role ❌', 'error');
+        } else if (res.success && res.data) {
             const user = res.data;
             if (user.role !== role) {
-                showToast('Role mismatch — please select the correct role.', 'error');
+                showToast('Role mismatch — please select the correct role for this account.', 'error');
             } else {
                 currentUser = user;
                 closeLoginModal();
-                await initDashboard(role, user);
+                initDashboard(role, user); // non-blocking — dashboard shows immediately
                 showToast(`Welcome back, ${user.name}! 👋`, 'success');
             }
         } else {
-            showToast(res.message || 'Invalid credentials ❌', 'error');
+            showToast('Unexpected response from server. Please try again.', 'error');
         }
     } catch (e) {
-        showToast('Cannot reach backend. Start Spring Boot on port 9090. ❌', 'error');
+        clearTimeout(wakeupTimer);
+        // Network error (backend unreachable, CORS, etc.)
+        showToast('Cannot reach the server. Check your internet connection or wait for the backend to wake up. 🔄', 'error');
     }
     if (btn) { btn.textContent = 'Sign In'; btn.disabled = false; }
 }
@@ -2873,7 +2886,9 @@ function showToast(message, type = 'success') {
     const toast = document.getElementById('toast');
     if (!toast) return;
     toast.textContent = message;
-    toast.className = `toast toast-${type} show`;
+    // Map 'info' and 'warning' to supported CSS classes
+    const cls = type === 'info' ? 'success' : type === 'warning' ? 'error' : type;
+    toast.className = `toast toast-${cls} show`;
     clearTimeout(toast._timeout);
     toast._timeout = setTimeout(() => toast.classList.remove('show'), 3500);
 }
