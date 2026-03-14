@@ -164,6 +164,27 @@ public class ApiController {
         }
     }
 
+    @PutMapping("/users/{id}/password")
+    public ResponseEntity<ApiResponse> changePassword(
+            @PathVariable Integer id,
+            @RequestBody Map<String, Object> body) {
+        try {
+            String newPassword = (String) body.get("newPassword");
+            if (newPassword == null)
+                newPassword = (String) body.get("new_password");
+            if (newPassword == null)
+                newPassword = (String) body.get("password");
+
+            Integer reqId = toInt(body.get("requestorId"));
+            String reqName = (String) body.getOrDefault("requestorName", "Admin");
+
+            userService.changePassword(id, newPassword, reqId, reqName);
+            return ok(ApiResponse.ok("Password updated successfully", null));
+        } catch (Exception e) {
+            return ok(ApiResponse.error(e.getMessage()));
+        }
+    }
+
     /** PUT /api/users/{id}/status — toggle active / inactive */
     @PutMapping("/users/{id}/status")
     public ResponseEntity<ApiResponse> updateStatus(@PathVariable Integer id,

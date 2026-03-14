@@ -140,6 +140,19 @@ public class UserService {
         return saved;
     }
 
+    // ── CHANGE PASSWORD ────────────────────────────────────────────────────────
+    public void changePassword(Integer id, String rawNewPassword, Integer requestorId, String requestorName) {
+        User u = userRepo.findById(id)
+                .orElseThrow(() -> new RuntimeException("User not found: " + id));
+        if (rawNewPassword == null || rawNewPassword.isBlank())
+            throw new RuntimeException("New password cannot be empty");
+        u.setPassword(encoder.encode(rawNewPassword));
+        userRepo.save(u);
+        audit.log(requestorId, requestorName,
+                "Changed password for user: " + u.getName(),
+                project.spms.spms.entity.AuditLog.AuditType.update);
+    }
+
     // ── UPDATE STATUS ──────────────────────────────────────────────────────────
     public void updateStatus(Integer id, String status, Integer requestorId, String requestorName) {
         userRepo.updateStatus(id, status);
