@@ -191,26 +191,33 @@ async function handleLogin(event) {
 }
 
 async function initDashboard(role, user) {
-    // Update landing page live stats before hiding it
-    try {
-        const usersRes = await api('GET', '/users').catch(()=>null);
-        if (usersRes?.data) {
-            allUsers = usersRes.data; // cache for use across app
-            const el = document.getElementById('counterUsers');
-            if (el) el.textContent = usersRes.data.length;
-        }
-    } catch {}
+    // Show the dashboard IMMEDIATELY — don't wait for API calls
     document.getElementById('landingPage').classList.add('hidden');
     const dashMap = { employee:'employeeDashboard', manager:'managerDashboard', hr:'hrDashboard', admin:'adminDashboard' };
     const dash = document.getElementById(dashMap[role]);
     if (!dash) return;
     dash.classList.remove('hidden');
     updateSidebarUser(role, user);
-    await loadNotifications();
-    if (role === 'employee') await initEmployeeDashboard(user);
-    else if (role === 'manager') await initManagerDashboard(user);
-    else if (role === 'hr') await initHRDashboard(user);
-    else if (role === 'admin') await initAdminDashboard(user);
+
+    // Load everything in parallel — non-blocking so login feels instant
+    loadNotifications().catch(() => {});
+
+    // Init the role dashboard (loads data, renders stats)
+    try {
+        if (role === 'employee')      await initEmployeeDashboard(user);
+        else if (role === 'manager')  await initManagerDashboard(user);
+        else if (role === 'hr')       await initHRDashboard(user);
+        else if (role === 'admin')    await initAdminDashboard(user);
+    } catch(e) { console.warn('Dashboard init error:', e.message); }
+
+    // Update landing page counter in background (non-blocking)
+    api('GET', '/users').then(r => {
+        if (r?.data) {
+            allUsers = r.data;
+            const el = document.getElementById('counterUsers');
+            if (el) el.textContent = r.data.length;
+        }
+    }).catch(() => {});
 }
 
 function updateSidebarUser(role, user) {
@@ -315,16 +322,31 @@ function parseSkills(raw) {
     }
     return [];
 }
+function parseUTCDate(ts) {
+    if (!ts) return null;
+    // Spring Boot's LocalDateTime serialises as "2026-03-14T10:30:00" — no Z/offset.
+    // JS treats bare ISO strings as LOCAL time, so IST users see times 5:30h behind.
+    // Append 'Z' to force UTC interpretation; JS then converts to the user's local time.
+    const s = String(ts);
+    const normalised = (s.includes('Z') || s.includes('+') || s.includes('-', 10))
+        ? s          // already has timezone info — leave alone
+        : s + 'Z';   // no timezone → treat as UTC
+    const d = new Date(normalised);
+    return isNaN(d) ? null : d;
+}
+
 function formatTime(ts) {
     if (!ts) return '';
-    const d = new Date(ts);
-    if (isNaN(d)) return ts;
-    const diff = (Date.now() - d) / 1000;
-    if (diff < 60)   return 'just now';
-    if (diff < 3600) return `${Math.floor(diff/60)} min ago`;
-    if (diff < 86400)return `${Math.floor(diff/3600)} hours ago`;
-    if (diff < 604800)return `${Math.floor(diff/86400)} days ago`;
-    return d.toLocaleDateString();
+    const d = parseUTCDate(ts);
+    if (!d) return String(ts);
+    const diff = (Date.now() - d.getTime()) / 1000;
+    if (diff < 0)     return 'just now';          // clock skew edge case
+    if (diff < 60)    return 'just now';
+    if (diff < 3600)  return `${Math.floor(diff / 60)} min ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)} hr ago`;
+    if (diff < 604800)return `${Math.floor(diff / 86400)} days ago`;
+    // Older than a week — show full localised date + time
+    return d.toLocaleString(undefined, { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' });
 }
 function initials(name) { return (name||'').split(' ').map(w=>w[0]||'').join('').substring(0,3).toUpperCase(); }
 
