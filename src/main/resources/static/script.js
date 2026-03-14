@@ -1479,7 +1479,7 @@ async function sendMessage(employeeId) {
     const msg = document.getElementById('msgContent')?.value?.trim();
     if (!msg) { showToast('Please enter a message', 'error'); return; }
     try {
-        await api('POST', '/messages', { toId: employeeId, fromId: currentUser?.id, subject: `Message from ${currentUser?.name||'Manager'}`, body: msg });
+        await api('POST', '/messages', { to_id: employeeId, from_id: currentUser?.id, subject: `Message from ${currentUser?.name||'Manager'}`, body: msg });
         closeModal('tempMsgModal');
         showToast('Message sent successfully 📨');
     } catch (e) {
@@ -1844,15 +1844,18 @@ function backToProjectSelection() {
 async function confirmDeptAssignment() {
     if (!_hrSelectedProject) { showToast('No project selected ⚠️', 'error'); return; }
     if (!_selectedDeptNames.length) { showToast('Please select at least one department ⚠️', 'error'); return; }
-    const deptName = _selectedDeptNames[0]; // project has one department_name column
+
+    // Append new departments to existing ones (comma-separated in single column)
+    const existing = (_hrSelectedProject.department_name || _hrSelectedProject.departmentName || '')
+        .split(',').map(s=>s.trim()).filter(Boolean);
+    const merged = [...new Set([...existing, ..._selectedDeptNames])].join(', ');
+
     try {
-        // Use PUT /projects/{id} to set departmentName + activate project
         await api('PUT', `/projects/${_hrSelectedProject.id}`, {
-            departmentName: deptName,
-            department_name: deptName,
+            department_name: merged,
             status: 'active'
         });
-        showToast(`Project assigned to ${deptName} ✓`);
+        showToast(`Project assigned to: ${merged} ✓`);
         const projRes = await api('GET', '/projects');
         allProjects = projRes.data || allProjects;
         backToProjectSelection();
@@ -1953,12 +1956,13 @@ async function openHRManageProjectModal(projectId) {
 
 async function hrRemoveDeptFromProject(projectId, deptName) {
     try {
-        // Clear the department assignment via PUT /projects/{id}
-        await api('PUT', `/projects/${projectId}`, {
-            departmentName: '',
-            department_name: '',
-            status: 'unassigned'
-        });
+        const proj = allProjects.find(p => p.id === projectId);
+        const existing = (proj?.department_name || proj?.departmentName || '')
+            .split(',').map(s => s.trim()).filter(Boolean);
+        const remaining = existing.filter(d => d !== deptName);
+        const newDept = remaining.join(', ');
+        const newStatus = remaining.length ? 'active' : 'unassigned';
+        await api('PUT', `/projects/${projectId}`, { department_name: newDept, status: newStatus });
         showToast(`${deptName} removed ✓`);
         const projRes = await api('GET', '/projects');
         allProjects = projRes.data || allProjects;
@@ -1973,11 +1977,12 @@ async function hrAddDeptToProject(projectId) {
     const deptName = document.getElementById('hrAddDeptSelect')?.value;
     if (!deptName) { showToast('Please select a department ⚠️', 'error'); return; }
     try {
-        await api('PUT', `/projects/${projectId}`, {
-            departmentName: deptName,
-            department_name: deptName,
-            status: 'active'
-        });
+        const proj = allProjects.find(p => p.id === projectId);
+        const existing = (proj?.department_name || proj?.departmentName || '')
+            .split(',').map(s => s.trim()).filter(Boolean);
+        if (existing.includes(deptName)) { showToast(`${deptName} already assigned`, 'error'); return; }
+        const merged = [...existing, deptName].join(', ');
+        await api('PUT', `/projects/${projectId}`, { department_name: merged, status: 'active' });
         showToast(`${deptName} added ✓`);
         const projRes = await api('GET', '/projects');
         allProjects = projRes.data || allProjects;
@@ -2331,46 +2336,40 @@ async function handleEditUser(event) {
     const skillsRaw= document.getElementById('editUserSkills')?.value?.trim() || '';
     const skills   = skillsRaw ? skillsRaw.split(',').map(s=>s.trim()).filter(Boolean) : null;
 
-    // Minimal payload — only send fields the backend PUT /users/{id} accepts
-    const payload = { name, email, role, department_name: dept };
-    if (perfRaw)         payload.performance_score  = parseInt(perfRaw);
-    if (hoursRaw)        payload.hours_per_week      = parseInt(hoursRaw);
-    if (skills !== null) payload.skills              = skills;
+    // Fetch existing user to get username (required NOT NULL in DB)
+    const existingUser = allUsers.find(u => u.id === id) || {};
+    const username = existingUser.username || existingUser.email?.split('@')[0] || '';
 
-    let ok = false;
+    // All fields in snake_case (SNAKE_CASE Jackson strategy)
+    // Include username because it's NOT NULL in DB and backend DTO likely validates it
+    const payload = { name, email, role, username, department_name: dept };
+    if (perfRaw)         payload.performance_score = parseInt(perfRaw);
+    if (hoursRaw)        payload.hours_per_week    = parseInt(hoursRaw);
+    if (skills !== null) payload.skills            = skills;
+
     try {
         await api('PUT', `/users/${id}`, payload);
-        ok = true;
-    } catch(e1) {
-        // Backend rejected — try with only absolutely core fields
-        try {
-            await api('PUT', `/users/${id}`, { name, email, role, department_name: dept });
-            ok = true;
-            // Try skills/perf separately via PATCH
-            if (skills !== null || perfRaw || hoursRaw) {
-                const patch = {};
-                if (skills !== null) patch.skills = skills;
-                if (perfRaw)  patch.performance_score = parseInt(perfRaw);
-                if (hoursRaw) patch.hours_per_week    = parseInt(hoursRaw);
-                await api('PATCH', `/users/${id}`, patch).catch(()=>{});
-            }
-        } catch(e2) {
-            showToast(`Update failed: ${e2.message}`, 'error'); return;
-        }
-    }
 
-    if (ok) {
-        // Change password separately if provided
+        // Handle password change separately (BCrypt hashing requires dedicated endpoint)
         if (password) {
-            await api('PUT', `/users/${id}/password`, { password, newPassword: password })
-                .catch(()=> api('PATCH', `/users/${id}`, { password }).catch(()=>{}));
+            const pwEndpoints = [
+                () => api('PUT',  `/users/${id}/password`,       { new_password: password, password }),
+                () => api('POST', `/users/${id}/change-password`, { new_password: password, password }),
+                () => api('PATCH',`/users/${id}`,                 { password }),
+            ];
+            for (const fn of pwEndpoints) {
+                try { await fn(); break; } catch {}
+            }
         }
-        const fresh = await api('GET', '/users').catch(()=>({ data:allUsers }));
+
+        const fresh = await api('GET', '/users').catch(()=>({ data: allUsers }));
         allUsers = fresh.data || allUsers;
         closeModal('editUserModal');
         renderUserManagement();
         renderAdminStats();
         showToast(`User ${name} updated ✓`);
+    } catch(e) {
+        showToast(`Update failed: ${e.message}`, 'error');
     }
 }
 
@@ -3235,7 +3234,6 @@ window.renderAdminProfile   = renderAdminProfile;
 //  PASSWORD CHANGE (available to all roles from profile)
 // ============================================================
 async function changePassword(userId) {
-    // Support both generic IDs (employee profile in HTML) and scoped IDs (dynamic profiles)
     const getVal = id => {
         const scoped = document.getElementById(`${id}_${userId}`);
         return (scoped ? scoped.value : document.getElementById(id)?.value) || '';
@@ -3246,16 +3244,37 @@ async function changePassword(userId) {
     if (!cur || !nw || !conf) { showToast('Please fill in all fields ⚠️', 'error'); return; }
     if (nw !== conf)           { showToast('New passwords do not match ⚠️', 'error'); return; }
     if (nw.length < 6)         { showToast('Password must be at least 6 characters', 'error'); return; }
-    try {
-        // Try dedicated endpoint first, then fallback
-        await api('PUT', `/users/${userId}/password`, { currentPassword: cur, password: nw, newPassword: nw })
-            .catch(()=> api('PUT',   `/users/${userId}`, { password: nw })
-            .catch(()=> api('PATCH', `/users/${userId}`, { password: nw })));
+
+    // Try multiple endpoint + payload patterns (snake_case because Jackson SNAKE_CASE strategy)
+    // BCrypt: password MUST be hashed server-side — only dedicated endpoints do that
+    const attempts = [
+        () => api('PUT',  `/users/${userId}/password`,        { current_password: cur, new_password: nw }),
+        () => api('POST', `/users/${userId}/change-password`,  { current_password: cur, new_password: nw }),
+        () => api('PUT',  `/users/${userId}/password`,        { password: nw, new_password: nw, current_password: cur }),
+        () => api('PATCH',`/users/${userId}/password`,        { current_password: cur, new_password: nw }),
+        // Last resort: direct update (only works if backend hashes on PUT)
+        () => api('PUT',  `/users/${userId}`,                 (() => {
+            const u = allUsers.find(x=>x.id==userId)||{};
+            return { name:u.name, email:u.email, role:u.role, username:u.username||u.email?.split('@')[0]||'',
+                     department_name:u.departmentName||u.department_name||'', password:nw };
+        })()),
+    ];
+
+    let success = false;
+    let lastErr = '';
+    for (const fn of attempts) {
+        try { await fn(); success = true; break; }
+        catch(e) { lastErr = e.message; }
+    }
+
+    if (success) {
         ['pwCurrent','pwNew','pwConfirm',
          `pwCurrent_${userId}`,`pwNew_${userId}`,`pwConfirm_${userId}`
         ].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
-        showToast('Password changed successfully 🔒');
-    } catch(e) { showToast(`Failed: ${e.message}`, 'error'); }
+        showToast('Password updated — please log in again with your new password 🔒');
+    } else {
+        showToast(`Password change failed: ${lastErr}`, 'error');
+    }
 }
 window.changePassword = changePassword;
 
@@ -3584,7 +3603,7 @@ async function loadConversations() {
             const preview = (last?.body || '').substring(0, 45) + ((last?.body||'').length > 45 ? '…' : '');
             const isActive = _msgCurrentThread?.partnerId == c.partnerId;
             const safeName = (c.partnerName||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-            return `<div class="msg-conv-item${isActive ? ' active' : ''}" onclick="openThread(${c.partnerId},'${safeName}')">
+            return `<div class="msg-conv-item${isActive ? ' active' : ''}" data-partner-id="${c.partnerId}" onclick="openThread(${c.partnerId},'${safeName}')">
                 <div style="display:flex;justify-content:space-between;align-items:center">
                     <div style="font-weight:${c.unread?700:500};font-size:0.875rem">${c.partnerName}</div>
                     ${c.unread ? `<span class="badge badge-primary" style="font-size:0.65rem;padding:0.1rem 0.4rem">${c.unread}</span>` : ''}
@@ -3605,66 +3624,63 @@ async function openThread(partnerId, partnerName) {
     const subtitle   = document.getElementById('msgModalSubtitle');
     if (!threadArea) return;
 
-    // Highlight active conversation
-    document.querySelectorAll('.msg-conv-item').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.msg-conv-item').forEach(el => {
-        if (el.onclick && el.getAttribute('onclick')?.includes(partnerId)) el.classList.add('active');
-    });
-
+    // Always resolve the real name from allUsers
+    const partnerUser = allUsers.find(u => u.id == partnerId);
+    if (partnerUser?.name) {
+        partnerName = partnerUser.name;
+        _msgCurrentThread.partnerName = partnerName;
+    }
     if (subtitle) subtitle.textContent = `Conversation with ${partnerName}`;
     threadArea.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-secondary)">Loading…</div>';
     if (replyBar) replyBar.style.display = 'flex';
 
-    try {
-        const res = await api('GET', `/messages?userId=${currentUser.id}`).catch(() =>
-            api('GET', `/messages/inbox/${currentUser.id}`).catch(() => ({ data: [] }))
-        );
-        const all = res?.data || [];
-        // Resolve actual partner name from allUsers if not passed correctly
-        const partnerUser = allUsers.find(u => u.id == partnerId);
-        if (partnerUser && partnerUser.name && partnerName.startsWith('User #')) {
-            partnerName = partnerUser.name;
-            _msgCurrentThread.partnerName = partnerName;
-        } else if (partnerUser && partnerUser.name && partnerName === 'Unknown') {
-            partnerName = partnerUser.name;
-            _msgCurrentThread.partnerName = partnerName;
-        }
-        if (subtitle) subtitle.textContent = `Conversation with ${partnerName}`;
+    // Highlight active conv item
+    document.querySelectorAll('.msg-conv-item').forEach(el => {
+        el.classList.toggle('active', el.dataset.partnerId == partnerId);
+    });
 
-        const thread = all.filter(m => {
-            const fid = m.fromId || m.from_id;
-            const tid = m.toId   || m.to_id;
+    try {
+        // Try fetching thread directly, fall back to full inbox filter
+        const res = await api('GET', `/messages?from_id=${currentUser.id}&to_id=${partnerId}`)
+            .catch(() => api('GET', `/messages?userId=${currentUser.id}`)
+            .catch(() => api('GET', `/messages`).catch(() => ({ data: [] }))));
+
+        let all = res?.data || [];
+        // Filter to this conversation only
+        all = all.filter(m => {
+            const fid = m.from_id ?? m.fromId;
+            const tid = m.to_id   ?? m.toId;
             return (fid == currentUser.id && tid == partnerId) ||
                    (fid == partnerId      && tid == currentUser.id);
-        }).sort((a, b) => new Date(a.created_at||0) - new Date(b.created_at||0));
+        }).sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
 
-        // Mark unread as read
-        const unread = thread.filter(m => !(m.is_read||m.isRead) && (m.toId||m.to_id) == currentUser.id);
-        unread.forEach(m => api('PUT', `/messages/${m.id}/read`).catch(()=>{}));
+        // Mark received messages as read
+        all.filter(m => !(m.is_read) && (m.to_id ?? m.toId) == currentUser.id)
+           .forEach(m => api('PUT', `/messages/${m.id}/read`, { is_read: 1 }).catch(() => {}));
 
-        if (!thread.length) {
+        if (!all.length) {
             threadArea.innerHTML = `<div style="text-align:center;padding:3rem;color:var(--text-secondary)">
                 <div style="font-size:2rem;margin-bottom:0.5rem">💬</div>
                 <p>No messages yet. Send the first one!</p></div>`;
         } else {
-            threadArea.innerHTML = thread.map(m => {
-                const isMine = (m.fromId || m.from_id) === currentUser.id;
-                const time   = m.created_at ? new Date(m.created_at).toLocaleString() : '';
-                return `<div style="display:flex;flex-direction:column;align-items:${isMine?'flex-end':'flex-start'};margin-bottom:1rem">
-                    <div style="max-width:75%;background:${isMine?'var(--primary)':'var(--bg-secondary)'};color:${isMine?'#fff':'var(--text-primary)'};padding:0.65rem 0.9rem;border-radius:${isMine?'12px 12px 2px 12px':'12px 12px 12px 2px'};font-size:0.875rem;line-height:1.4">
-                        ${m.subject ? `<div style="font-weight:600;margin-bottom:0.25rem;font-size:0.8rem;opacity:0.85">${m.subject}</div>` : ''}
-                        ${m.body||''}
+            threadArea.innerHTML = all.map(m => {
+                const isMine = (m.from_id ?? m.fromId) == currentUser.id;
+                const senderName = isMine ? 'You' : partnerName;
+                const time = m.created_at ? new Date(m.created_at).toLocaleString() : '';
+                return `<div style="display:flex;flex-direction:column;align-items:${isMine ? 'flex-end' : 'flex-start'};margin-bottom:1rem">
+                    <div style="max-width:75%;background:${isMine ? 'var(--primary)' : 'var(--bg-secondary)'};color:${isMine ? '#fff' : 'var(--text-primary)'};padding:0.65rem 0.9rem;border-radius:${isMine ? '12px 12px 2px 12px' : '12px 12px 12px 2px'};font-size:0.875rem;line-height:1.4">
+                        ${m.subject && m.subject !== 'Re: message' ? `<div style="font-weight:600;margin-bottom:0.25rem;font-size:0.8rem;opacity:0.85">${m.subject}</div>` : ''}
+                        ${m.body || ''}
                     </div>
-                    <div style="font-size:0.7rem;color:var(--text-secondary);margin-top:0.2rem">${isMine?'You':partnerName} · ${time}</div>
+                    <div style="font-size:0.7rem;color:var(--text-secondary);margin-top:0.2rem">${senderName} · ${time}</div>
                 </div>`;
             }).join('');
             threadArea.scrollTop = threadArea.scrollHeight;
         }
 
-        // Refresh conversation list badges
         await loadConversations();
     } catch(e) {
-        threadArea.innerHTML = `<div style="color:var(--text-secondary);padding:1rem">Could not load thread: ${e.message}</div>`;
+        threadArea.innerHTML = `<div style="color:var(--text-secondary);padding:1rem">Could not load: ${e.message}</div>`;
     }
 }
 window.openThread = openThread;
@@ -3675,12 +3691,15 @@ async function sendMsgReply() {
     if (!text) { showToast('Write a message first ⚠️', 'error'); return; }
     try {
         await api('POST', '/messages', {
-            fromId: currentUser.id, toId: _msgCurrentThread.partnerId,
-            subject: `Re: message`, body: text
+            from_id: currentUser.id,
+            to_id:   _msgCurrentThread.partnerId,
+            body:    text
         });
-        document.getElementById('msgReplyText').value = '';
-        await openThread(_msgCurrentThread.partnerId, _msgCurrentThread.partnerName);
+        const el = document.getElementById('msgReplyText');
+        if (el) el.value = '';
         showToast('Message sent ✓');
+        // Reload thread to show the new message immediately
+        await openThread(_msgCurrentThread.partnerId, _msgCurrentThread.partnerName);
     } catch(e) { showToast(`Send failed: ${e.message}`, 'error'); }
 }
 window.sendMsgReply = sendMsgReply;
@@ -3732,7 +3751,9 @@ async function sendComposedMessage() {
     if (!body)  { showToast('Write a message first ⚠️', 'error'); return; }
     if (!toId)  { showToast('Select a recipient ⚠️', 'error'); return; }
     try {
-        await api('POST', '/messages', { fromId: currentUser.id, toId, subject: subj, body });
+        await api('POST', '/messages', { from_id: currentUser.id, to_id: toId, subject: subj, body });
+        // Save to audit log
+        await api('POST', '/activities', { user_id: currentUser.id, person_name: currentUser.name, action: `Sent message to user #${toId}`, activity_date: new Date().toISOString().split('T')[0], type: 'message' }).catch(()=>{});
         closeModal('composeModal');
         const partner = allUsers.find(u => u.id === toId);
         showToast(`Message sent to ${partner?.name || 'recipient'} ✓`);
@@ -3784,7 +3805,11 @@ async function saveAdminProfile() {
     if (!name || !email) { showToast('Name and email are required', 'error'); return; }
     try {
         await api('PUT', `/users/${currentUser.id}`, {
-            name, email, department_name: dept, skills
+            name, email,
+            username: currentUser.username || currentUser.email?.split('@')[0] || '',
+            role: currentUser.role,
+            department_name: dept,
+            skills
         });
         currentUser.name  = name;
         currentUser.email = email;
