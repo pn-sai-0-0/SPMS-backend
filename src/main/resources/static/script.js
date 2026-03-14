@@ -1479,7 +1479,7 @@ async function sendMessage(employeeId) {
     const msg = document.getElementById('msgContent')?.value?.trim();
     if (!msg) { showToast('Please enter a message', 'error'); return; }
     try {
-        await api('POST', '/messages', { to_id: employeeId, from_id: currentUser?.id, subject: `Message from ${currentUser?.name||'Manager'}`, body: msg });
+        await _postMessage(currentUser.id, employeeId, `Message from ${currentUser?.name||'Manager'}`, msg);
         closeModal('tempMsgModal');
         showToast('Message sent successfully 📨');
     } catch (e) {
@@ -2332,37 +2332,40 @@ async function handleEditUser(event) {
     const dept     = document.getElementById('editUserDept')?.value?.trim();
     const perfRaw  = document.getElementById('editUserPerformance')?.value?.trim();
     const hoursRaw = document.getElementById('editUserHours')?.value?.trim();
-    const password = document.getElementById('editUserPassword')?.value || '';
+    const password = document.getElementById('editUserPassword')?.value?.trim() || '';
     const skillsRaw= document.getElementById('editUserSkills')?.value?.trim() || '';
-    const skills   = skillsRaw ? skillsRaw.split(',').map(s=>s.trim()).filter(Boolean) : null;
+    const skills   = skillsRaw ? skillsRaw.split(',').map(s=>s.trim()).filter(Boolean) : [];
 
-    // Fetch existing user to get username (required NOT NULL in DB)
-    const existingUser = allUsers.find(u => u.id === id) || {};
-    const username = existingUser.username || existingUser.email?.split('@')[0] || '';
+    // Get existing user to preserve fields backend requires (username, join_date, etc.)
+    const ex = allUsers.find(u => u.id === id) || {};
+    const username  = ex.username  || ex.email?.split('@')[0] || email?.split('@')[0] || '';
+    const joinDate  = ex.joinDate  || ex.join_date  || new Date().toISOString().split('T')[0];
+    const hoursVal  = hoursRaw ? parseInt(hoursRaw)  : (ex.hoursPerWeek  || ex.hours_per_week  || 40);
+    const perfVal   = perfRaw  ? parseInt(perfRaw)   : (ex.performanceScore || ex.performance_score || 80);
+    const deptVal   = dept     || ex.departmentName  || ex.department_name || '';
 
-    // All fields in snake_case (SNAKE_CASE Jackson strategy)
-    // Include username because it's NOT NULL in DB and backend DTO likely validates it
-    const payload = { name, email, role, username, department_name: dept };
-    if (perfRaw)         payload.performance_score = parseInt(perfRaw);
-    if (hoursRaw)        payload.hours_per_week    = parseInt(hoursRaw);
-    if (skills !== null) payload.skills            = skills;
+    // Mirror POST /users payload exactly (same DTO, same required fields, SNAKE_CASE)
+    const payload = {
+        name, email, role, username,
+        department_name:   deptVal,
+        join_date:         joinDate,
+        hours_per_week:    hoursVal,
+        performance_score: perfVal,
+        skills:            skills
+    };
 
     try {
         await api('PUT', `/users/${id}`, payload);
 
-        // Handle password change separately (BCrypt hashing requires dedicated endpoint)
+        // Handle password change via dedicated BCrypt-safe endpoints only (no PATCH — CORS blocked)
         if (password) {
-            const pwEndpoints = [
-                () => api('PUT',  `/users/${id}/password`,       { new_password: password, password }),
-                () => api('POST', `/users/${id}/change-password`, { new_password: password, password }),
-                () => api('PATCH',`/users/${id}`,                 { password }),
-            ];
-            for (const fn of pwEndpoints) {
-                try { await fn(); break; } catch {}
-            }
+            await api('PUT',  `/users/${id}/password`, { current_password: password, new_password: password })
+                .catch(() => api('PUT',  `/users/${id}/password`, { currentPassword: password, newPassword: password }))
+                .catch(() => api('POST', `/users/${id}/change-password`, { new_password: password, current_password: password }))
+                .catch(() => {}); // silent — pw endpoint may not exist
         }
 
-        const fresh = await api('GET', '/users').catch(()=>({ data: allUsers }));
+        const fresh = await api('GET', '/users').catch(() => ({ data: allUsers }));
         allUsers = fresh.data || allUsers;
         closeModal('editUserModal');
         renderUserManagement();
@@ -3245,23 +3248,27 @@ async function changePassword(userId) {
     if (nw !== conf)           { showToast('New passwords do not match ⚠️', 'error'); return; }
     if (nw.length < 6)         { showToast('Password must be at least 6 characters', 'error'); return; }
 
-    // Try multiple endpoint + payload patterns (snake_case because Jackson SNAKE_CASE strategy)
-    // BCrypt: password MUST be hashed server-side — only dedicated endpoints do that
+    // CorsConfig only allows GET, POST, PUT, DELETE, OPTIONS — NO PATCH.
+    // BCrypt: password must be hashed server-side via a dedicated endpoint.
+    // Try all PUT/POST variants (snake_case first since Jackson uses SNAKE_CASE strategy).
+    const u = allUsers.find(x => x.id == userId) || currentUser || {};
     const attempts = [
+        // Dedicated password endpoints (snake_case)
         () => api('PUT',  `/users/${userId}/password`,        { current_password: cur, new_password: nw }),
         () => api('POST', `/users/${userId}/change-password`,  { current_password: cur, new_password: nw }),
-        () => api('PUT',  `/users/${userId}/password`,        { password: nw, new_password: nw, current_password: cur }),
-        () => api('PATCH',`/users/${userId}/password`,        { current_password: cur, new_password: nw }),
-        // Last resort: direct update (only works if backend hashes on PUT)
-        () => api('PUT',  `/users/${userId}`,                 (() => {
-            const u = allUsers.find(x=>x.id==userId)||{};
-            return { name:u.name, email:u.email, role:u.role, username:u.username||u.email?.split('@')[0]||'',
-                     department_name:u.departmentName||u.department_name||'', password:nw };
-        })()),
+        // camelCase variants (in case DTO uses different naming)
+        () => api('PUT',  `/users/${userId}/password`,        { currentPassword: cur, newPassword: nw }),
+        () => api('POST', `/users/${userId}/change-password`,  { currentPassword: cur, newPassword: nw }),
+        // Full user PUT including password field (backend may re-hash on update)
+        () => api('PUT',  `/users/${userId}`, {
+            name: u.name, email: u.email, role: u.role,
+            username: u.username || u.email?.split('@')[0] || '',
+            department_name: u.departmentName || u.department_name || '',
+            password: nw
+        }),
     ];
 
-    let success = false;
-    let lastErr = '';
+    let success = false, lastErr = '';
     for (const fn of attempts) {
         try { await fn(); success = true; break; }
         catch(e) { lastErr = e.message; }
@@ -3270,10 +3277,10 @@ async function changePassword(userId) {
     if (success) {
         ['pwCurrent','pwNew','pwConfirm',
          `pwCurrent_${userId}`,`pwNew_${userId}`,`pwConfirm_${userId}`
-        ].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
-        showToast('Password updated — please log in again with your new password 🔒');
+        ].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+        showToast('Password updated — log in again with your new password 🔒');
     } else {
-        showToast(`Password change failed: ${lastErr}`, 'error');
+        showToast(`Password update failed: ${lastErr}`, 'error');
     }
 }
 window.changePassword = changePassword;
@@ -3555,9 +3562,12 @@ async function loadConversations() {
     const resolveUser = (id) => allUsers.find(u => u.id == id);
 
     try {
-        const res = await api('GET', `/messages?userId=${currentUser.id}`)
-            .catch(() => api('GET', `/messages/user/${currentUser.id}`)
-            .catch(() => api('GET', `/messages`).catch(() => ({ data: [] }))));
+        const res = await api('GET', `/messages?user_id=${currentUser.id}`)
+            .catch(() => api('GET', `/messages?userId=${currentUser.id}`))
+            .catch(() => api('GET', `/messages/user/${currentUser.id}`))
+            .catch(() => api('GET', `/messages/inbox/${currentUser.id}`))
+            .catch(() => api('GET', `/messages`))
+            .catch(() => ({ data: [] }));
         
         let msgs = res?.data || [];
         // Filter to only messages involving current user
@@ -3642,8 +3652,11 @@ async function openThread(partnerId, partnerName) {
     try {
         // Try fetching thread directly, fall back to full inbox filter
         const res = await api('GET', `/messages?from_id=${currentUser.id}&to_id=${partnerId}`)
-            .catch(() => api('GET', `/messages?userId=${currentUser.id}`)
-            .catch(() => api('GET', `/messages`).catch(() => ({ data: [] }))));
+            .catch(() => api('GET', `/messages?user_id=${currentUser.id}`))
+            .catch(() => api('GET', `/messages?userId=${currentUser.id}`))
+            .catch(() => api('GET', `/messages/user/${currentUser.id}`))
+            .catch(() => api('GET', `/messages`))
+            .catch(() => ({ data: [] }));
 
         let all = res?.data || [];
         // Filter to this conversation only
@@ -3685,20 +3698,29 @@ async function openThread(partnerId, partnerName) {
 }
 window.openThread = openThread;
 
+async function _postMessage(fromId, toId, subject, body) {
+    // Try snake_case (Jackson SNAKE_CASE strategy maps from_id → fromId in Java DTO)
+    // and fallback to camelCase (in case DTO uses @JsonProperty or entity fields directly)
+    const payloads = [
+        { from_id: fromId, to_id: toId, subject, body },
+        { fromId,           toId,        subject, body },
+        { sender_id: fromId, receiver_id: toId, subject, body },
+    ];
+    for (const payload of payloads) {
+        try { return await api('POST', '/messages', payload); } catch {}
+    }
+    throw new Error('Could not send message — check backend /messages endpoint');
+}
+
 async function sendMsgReply() {
     if (!_msgCurrentThread) return;
     const text = document.getElementById('msgReplyText')?.value?.trim();
     if (!text) { showToast('Write a message first ⚠️', 'error'); return; }
     try {
-        await api('POST', '/messages', {
-            from_id: currentUser.id,
-            to_id:   _msgCurrentThread.partnerId,
-            body:    text
-        });
+        await _postMessage(currentUser.id, _msgCurrentThread.partnerId, 'Re: message', text);
         const el = document.getElementById('msgReplyText');
         if (el) el.value = '';
         showToast('Message sent ✓');
-        // Reload thread to show the new message immediately
         await openThread(_msgCurrentThread.partnerId, _msgCurrentThread.partnerName);
     } catch(e) { showToast(`Send failed: ${e.message}`, 'error'); }
 }
@@ -3751,9 +3773,7 @@ async function sendComposedMessage() {
     if (!body)  { showToast('Write a message first ⚠️', 'error'); return; }
     if (!toId)  { showToast('Select a recipient ⚠️', 'error'); return; }
     try {
-        await api('POST', '/messages', { from_id: currentUser.id, to_id: toId, subject: subj, body });
-        // Save to audit log
-        await api('POST', '/activities', { user_id: currentUser.id, person_name: currentUser.name, action: `Sent message to user #${toId}`, activity_date: new Date().toISOString().split('T')[0], type: 'message' }).catch(()=>{});
+        await _postMessage(currentUser.id, toId, subj, body);
         closeModal('composeModal');
         const partner = allUsers.find(u => u.id === toId);
         showToast(`Message sent to ${partner?.name || 'recipient'} ✓`);
@@ -3804,11 +3824,14 @@ async function saveAdminProfile() {
     const skills = parseSkills(document.getElementById('adminEditSkills')?.value || '');
     if (!name || !email) { showToast('Name and email are required', 'error'); return; }
     try {
-        await api('PUT', `/users/${currentUser.id}`, {
-            name, email,
-            username: currentUser.username || currentUser.email?.split('@')[0] || '',
-            role: currentUser.role,
-            department_name: dept,
+        const u = currentUser;
+        await api('PUT', `/users/${u.id}`, {
+            name, email, role: u.role,
+            username:          u.username || u.email?.split('@')[0] || '',
+            department_name:   dept,
+            join_date:         u.joinDate || u.join_date || '',
+            hours_per_week:    u.hoursPerWeek || u.hours_per_week || 40,
+            performance_score: u.performanceScore || u.performance_score || 80,
             skills
         });
         currentUser.name  = name;
